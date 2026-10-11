@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "extracted_at": "2026-10-11",
+  "source_repository": "https://github.com/aodl/placeholder.git",
+  "source_revision": "7ff33b8573e7191deb6a3b23f748bb988ccc280f",
+  "s10_baseline_revision": "eb1f971e4190694ba76fec530e8f93ebce507939",
+  "path_map": {
+    "crates/dtr-core": "crates/dtr-core",
+    "crates/dtr-source-model": "crates/dtr-source-model",
+    "native/dtr-wire": "crates/dtr-wire",
+    "native/dtr-host": "crates/dtr-host",
+    "kernels/life-conformance": "examples/competitive-life",
+    "packages/client": "packages/client",
+    "packages/kernels/life-input.mjs": "packages/kernels/life-input.mjs",
+    "packages/kernels/life.mjs": "packages/kernels/life.mjs",
+    "packages/observation": "packages/observation",
+    "packages/protocol/bytes.mjs": "packages/protocol/bytes.mjs",
+    "packages/protocol/seal-codec.mjs": "packages/protocol/seal-codec.mjs",
+    "packages/runtime": "packages/runtime",
+    "packages/source/inbox.mjs": "packages/source/inbox.mjs",
+    "packages/source/scan.mjs": "packages/source/scan.mjs",
+    "packages/source/wakeup.mjs": "packages/source/wakeup.mjs",
+    "packages/storage": "packages/storage"
+  },
+  "tree_sha256": {
+    "crates/dtr-core": "1197fdd3dff7fc22092660d0aa14a883c011c17b129a836f2a39c0c198a4ac52",
+    "crates/dtr-source-model": "05befce944c71dd67bd1512d674f39c69257b7d738011a2400ed7ddb0899c299",
+    "crates/dtr-wire": "9ad4b191df6bd72838b66897a036060349a5d55090d7f4eb40c70601b3cfe42b",
+    "crates/dtr-host": "52fe6a73ce1c13392b16ff23a28e88907ced3b0334cd6d93ac7eb836ffa438f8",
+    "examples/competitive-life": "5ed2742bf3627b8612f170179c3ea36ffb0d55459b6ad1fa6b522d1e40e19159",
+    "packages/client": "247dc769313d022d47fd7b520765c08e2b04630d14180c63c77e2b5b2b5a72c3",
+    "packages/kernels": "b6576604c196aaf81b2cf172e52746b4b835ce7c8376980fdd2c27e45d754b8d",
+    "packages/observation": "5380a0c16d5e53ef812d19149f7e0a1b7d00112bb0669a985c665c597d5fae20",
+    "packages/protocol": "602645fb96893e745024a6b3c136234e8a6b85dbb153ee4223039df5c351ebf3",
+    "packages/runtime": "8c4c60933d85c5728d0871e8239010a1edba5daaa17dc7e6efbc34140e71925c",
+    "packages/source": "5a3e7a6bf1922e58e0a9d54ec5a658a3d8f4da26bd8d1dac9049ab788552a595",
+    "packages/storage": "09fa46dc7e70fb15b7adcbaf2986923fa8983919bd6e7912654f8d0d379a6e46"
+  },
+  "tree_hash_method": "sha256 of sorted sha256sum output for regular files below each path",
+  "notes": [
+    "The optional-render predecessor verification is intentionally tightened at the source revision.",
+    "The DTR storage recovery suite uses competitive Life; BTZ-specific recovery cases remain owned by BTZ.",
+    "No license was added because the source repository did not supply one."
+  ]
+}

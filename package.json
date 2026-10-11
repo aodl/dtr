@@ -1,0 +1,38 @@
+{
+  "name": "@dtr/timeline-runtime",
+  "version": "0.11.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "files": [
+    "index.mjs",
+    "packages/client/",
+    "packages/kernels/",
+    "packages/observation/",
+    "packages/protocol/",
+    "packages/runtime/",
+    "packages/source/",
+    "packages/storage/",
+    "README.md"
+  ],
+  "exports": {
+    ".": "./index.mjs",
+    "./client/*": "./packages/client/*.mjs",
+    "./examples/*": "./packages/kernels/*.mjs",
+    "./observation/*": "./packages/observation/*.mjs",
+    "./protocol/*": "./packages/protocol/*.mjs",
+    "./runtime/*": "./packages/runtime/*.mjs",
+    "./source/*": "./packages/source/*.mjs",
+    "./storage/*": "./packages/storage/*.mjs"
+  },
+  "scripts": {
+    "test": "node --test tests/js/*.test.mjs",
+    "check": "npm test && cargo test --workspace --locked && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings",
+    "pack:check": "npm pack --dry-run --json"
+  },
+  "dependencies": {
+    "@icp-sdk/core": "6.1.0"
+  }
+}

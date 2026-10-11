@@ -1,0 +1,9 @@
+[package]
+name = "life-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+dtr-core = { path = "../../crates/dtr-core" }

@@ -1,0 +1,10 @@
+import test from'node:test';import assert from'node:assert/strict';import{Wakeup}from'../../packages/source/wakeup.mjs';
+test('fallback works with zero notifications',()=>{const w=new Wakeup();const t=w.acquire(0);assert(w.complete(t,1,true));assert.equal(w.acquire(59),null);assert(w.acquire(60));});
+test('a thousand hints coalesce',()=>{const w=new Wakeup();for(let i=0;i<1000;++i)w.hint(true);const t=w.acquire(0);assert(t);assert.equal(w.acquire(1),null);assert.equal(w.generation,1n);});
+test('hint arriving during await survives successful completion',()=>{const w=new Wakeup();const t=w.acquire(0);w.hint(true);assert(w.complete(t,1,true));assert(w.acquire(2));});
+test('late callback cannot release replacement generation',()=>{const w=new Wakeup();const old=w.acquire(0),next=w.acquire(10);assert(next);assert.equal(w.complete(old,11,true),false);assert(w.complete(next,11,true));});
+test('lease expires even before a replacement is acquired',()=>{const w=new Wakeup();const t=w.acquire(0);assert.equal(w.complete(t,10,true),false);assert(w.acquire(10));});
+test('failed operation becomes dirty for retry',()=>{const w=new Wakeup();const t=w.acquire(0);w.complete(t,1,false);assert(w.acquire(2));});
+test('unauthorized hints do not force polling',()=>{const w=new Wakeup();const t=w.acquire(0);w.complete(t,1,true);w.hint(false);assert.equal(w.acquire(2),null);});
+test('minimum spacing prevents notification scan storm',()=>{const w=new Wakeup({minGap:5});const t=w.acquire(0);w.complete(t,1,true);w.hint(true);assert.equal(w.acquire(4),null);assert(w.acquire(5));});
+test('u64 overflow fails before state mutation',()=>{const w=new Wakeup();const max=(1n<<64n)-1n;assert.throws(()=>w.acquire(max));assert.equal(w.generation,0n);assert.equal(w.active,null);});
