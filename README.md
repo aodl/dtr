@@ -15,8 +15,8 @@ cargo +1.94.1 clippy --workspace --all-targets --locked -- -D warnings
 npm pack --dry-run --json
 ```
 
-The JavaScript package exposes explicit subpaths such as `@dtr/timeline-runtime/client/verification`, `@dtr/timeline-runtime/runtime/coordinator` and `@dtr/timeline-runtime/observation/publication`. The Rust crates share this repository revision and are consumed through exact Git revisions once an authorized remote exists.
+The JavaScript package exposes explicit subpaths such as `@dtr/timeline-runtime/client/verification`, `@dtr/timeline-runtime/runtime/coordinator` and `@dtr/timeline-runtime/observation/publication`. The Rust crates share this repository revision and are consumed through exact revisions from the public `https://github.com/aodl/dtr.git` remote.
 
 See [architecture and ownership](docs/ARCHITECTURE.md) and [extraction provenance](EXTRACTION.json).
 
-No package is published by this repository. A consumer must pin an immutable Git revision for the Rust crates and use a reviewed `npm pack` artifact for the JavaScript client until an authorized distribution remote exists.
+No registry package is published by this repository. A consumer must pin an immutable Git revision for the Rust crates and use a reviewed `npm pack` artifact for the JavaScript client.
