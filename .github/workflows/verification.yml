@@ -17,9 +17,18 @@ jobs:
           node-version: 24
           cache: npm
       - run: rustup toolchain install 1.94.1 --profile minimal --component rustfmt --component clippy
+      - run: mkdir -p .work/ci
       - run: npm ci --ignore-scripts
-      - run: npm test
-      - run: cargo test --workspace --locked
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: npm pack --dry-run --json
+      - run: set -o pipefail; npm test 2>&1 | tee .work/ci/npm-test.log
+      - run: set -o pipefail; cargo test --workspace --locked 2>&1 | tee .work/ci/cargo-test.log
+      - run: set -o pipefail; cargo fmt --all -- --check 2>&1 | tee .work/ci/cargo-fmt.log
+      - run: set -o pipefail; cargo clippy --workspace --all-targets --locked -- -D warnings 2>&1 | tee .work/ci/cargo-clippy.log
+      - run: set -o pipefail; npm pack --dry-run --json 2>&1 | tee .work/ci/npm-pack.json
+      - name: Upload standalone evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dtr-standalone-evidence
+          path: .work/ci/**
+          if-no-files-found: warn
+          retention-days: 14

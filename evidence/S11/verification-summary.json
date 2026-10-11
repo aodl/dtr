@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "checkpoint": "S11",
+  "date": "2026-10-11",
+  "repository_path": "/home/codexdev/src/dtr",
+  "branch": "checkpoint/s11-dtr-extraction",
+  "tested_implementation_commit": "71e59e93cf49a3656689679b538b4c3f138787f8",
+  "source_repository": "https://github.com/aodl/placeholder.git",
+  "source_revision": "7ff33b8573e7191deb6a3b23f748bb988ccc280f",
+  "remote": null,
+  "overall": "BLOCKED",
+  "local_result": "PASS",
+  "checks": [
+    {"id": "javascript-standalone", "status": "PASS", "tests": 186},
+    {"id": "rust-standalone", "status": "PASS", "tests": 29},
+    {"id": "competitive-life", "status": "PASS", "qualification": "Rust and JavaScript conformance under multiple work budgets"},
+    {"id": "rust-format", "status": "PASS"},
+    {"id": "rust-clippy", "status": "PASS"},
+    {"id": "npm-pack-inventory", "status": "PASS", "files": 20},
+    {"id": "clean-javascript-consumer", "status": "PASS", "tests": 1},
+    {"id": "clean-rust-consumer", "status": "PASS", "qualification": "Resolved four crates from a bare repository reconstructed only from the immutable Git bundle"},
+    {"id": "remote-clean-clone", "status": "BLOCKED", "reason": "The intended remote has not been authorized/created/pushed."},
+    {"id": "fresh-ci", "status": "BLOCKED", "reason": "No DTR remote exists on which to execute the prepared workflow."}
+  ],
+  "package": {
+    "name": "@dtr/timeline-runtime",
+    "version": "0.11.0",
+    "sha256": "ec890c3946d27efa1ef210a97db92407b04f61fc317f507988d46f20894d3ec8",
+    "npm_shasum": "c18748f304d8b9ff72259efdae3e4f68536fc800",
+    "integrity": "sha512-opmkcujWohpEHNGgOITafyBODDyXT8/ne+l+yZ7EUuu65QM8I3ADdbhWmGAvtfq2yNXoAokMibBvCMv9/sG9Eg=="
+  },
+  "lockfiles": {
+    "Cargo.lock": "2ac0c033cae46ba31de2f3bf0202ed35122930e8a896683d00050fc6c66af714",
+    "package-lock.json": "f8b83f61fa6399e66abb121e2546cb5b2282515fc6cd42374bfbf5d22c25eb48",
+    "clean-consumer-Cargo.lock": "7e45cb633d72e446aae16537f949ab097dabfd38993ede60a4c0428bd7accb77",
+    "clean-consumer-package-lock.json": "931c6805fb1d7f447c737090122822b350cb31041b3012e7104e2ace515f7459"
+  },
+  "clean_consumer": {
+    "path": "/home/codexdev/s11-clean-consumer",
+    "git_bundle_sha256": "2e867c5d7c877891d7f685de4aa3033532b15bf8f1f3856fa1ebf00d58dc8436",
+    "source_checkout_references": [],
+    "qualification": "Local pre-remote staging from immutable artifacts; not remote clean-clone evidence."
+  },
+  "tools": {
+    "rustc": "1.94.1",
+    "cargo": "1.94.1",
+    "node": "24.15.0",
+    "npm": "11.12.1",
+    "python": "3.11.14"
+  }
+}
