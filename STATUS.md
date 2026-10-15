@@ -1,7 +1,14 @@
-# Current status — S11 extraction
+# Current status — S14 shared changes, local and unpublished
 
-The reusable DTR sources have been extracted from `aodl/placeholder` revision `7ff33b8573e7191deb6a3b23f748bb988ccc280f`. The tested implementation is commit `71e59e93cf49a3656689679b538b4c3f138787f8` (tree `c7b4e138a1c5cc43744e984e6e4081fa483d9383`) in the public `https://github.com/aodl/dtr.git` repository. The checkpoint branch's verified remote head is documentation commit `ef80f1912e3a8472ae706996b6cd8ae02955d8ae`.
+DTR remains generic and independent of BTZ. The S11 implementation pin `71e59e93cf49a3656689679b538b4c3f138787f8` remains the published dependency consumed by BTZ until the user publishes and the consumer pins are deliberately updated.
 
-Standalone Rust, JavaScript, Life, formatting, Clippy and the 20-file package-inventory checks pass: 186 JavaScript tests and 29 Rust tests. GitHub Actions runs `38173294124` on `checkpoint/s11-dtr-extraction` and `38173327599` on `main` both passed at `8694044…`; post-closeout run `38208750331` also passed at `ef80f19…` and uploaded the standalone evidence artifact. The BTZ application consumes the exact implementation revision and a source-corresponding npm-pack artifact; its clean public-remote consumer and historical-upgrade gates pass locally and in BTZ CI run `38208721952`.
+Two narrow local API changes are implemented:
 
-Remote clean-clone and DTR CI are **PASS**, not blocked. BTZ’s fresh current-revision CI also passed. No registry publication, package release or public-network deployment occurred; production readiness remains separate from this S11 closeout.
+- `5e2af85`: `IngestOrdered { start, end, inputs, anchor }`, with JavaScript `ingestOrdered`. Shares validation with dense admission, preserves original sparse positions and atomically commits progress/inputs. Existing canonical encodings, dense behavior and Life remain unchanged.
+- `7df2a45`: `certificateVerifier` / `liveClient` take explicit network/deployment configuration. Mainnet uses the SDK root and rejects root overrides. Local compatibility wrappers share the same verifier/transport. Existing freshness, canister, delegation, artifact, predecessor and rollback checks remain.
+
+Executed locally: 190 JavaScript tests, 31 Rust tests (including Life), Rust formatting and Clippy passed. Raw logs are `.work/s14/dtr-b-js.log`, `.work/s14/dtr-a-rust.log` and `.work/s14/dtr-clippy.log`. These tests bind the substantive API implementation revision `7df2a459b37b04fc142d1f615a6da82dcc9c16f2`; this later status-only commit does not add another runtime change.
+
+The actual inspected package is `@dtr/timeline-runtime@0.12.0`, built from `7df2a45`, at `.work/s14/dtr-timeline-runtime-0.12.0.tgz`, SHA-256 `b9c1a060a2c51a1270f7b08274759ebeac7c1e8c79f974a81ad2dad274c3f03b`. BTZ tests this exact local package and Rust sources through explicit temporary overrides. No permanent sibling dependency or Git URL rewrite is installed.
+
+No remote Git action, package publication, mainnet deployment or new CI run occurred. The next boundary is user publication of `checkpoint/s14-sparse-input-mainnet-client`, followed by BTZ's actual immutable pin/package/lock update and consumer/application verification. Do not claim remote-pinned validation before that step.
