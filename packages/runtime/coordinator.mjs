@@ -16,10 +16,11 @@ function admit(i,start,end,inputs,anchor) {
   unhex(anchor,32);
   if(start!==i.cursor||!Array.isArray(inputs)||inputs.length>256)throw new Error('source prefix/page');
   for(const input of inputs)if(!input||Object.keys(input).sort().join(',')!=='payload_hex,position')throw new Error('input schema');
+  inputs=canonicalInputs(inputs);
   inputRoot(inputs,start,end);
   if(i.pending.length+inputs.length>4096)throw new Error('inbox backpressure');
   if(start===end&&anchor!==i.source_anchor)throw new Error('empty prefix anchor change');
-  i.pending.push(...structuredClone(inputs));i.cursor=end;i.source_anchor=anchor;i.revision++;
+  i.pending.push(...inputs);i.cursor=end;i.source_anchor=anchor;i.revision++;
 }
 function checkRevision(n) {
   if (!Number.isSafeInteger(n) || n < 0 || n > MAX_REVISION) throw new Error('coordinator revision');

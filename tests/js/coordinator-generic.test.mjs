@@ -48,3 +48,13 @@ test('ordered validation rejects gaps in the contract, not gaps in IDs, without 
  for(let n=0;n<16;n++){const start=BigInt(n*256);h.ingestOrdered(start,start+256n,Array.from({length:256},(_,i)=>row(start+BigInt(i))),'aa'.repeat(32));}
  const full=h.snapshot();assert.throws(()=>h.ingestOrdered(4096n,4097n,[row(4096n)],'aa'.repeat(32)),/backpressure/);assert.deepEqual(h.snapshot(),full);
 });
+
+test('ordered numeric/string positions normalize before durable reservation and recovery',()=>{
+ const outputs=[],images=[];
+ for(const position of [100n,100,'100']){
+  let h=fresh();h.ingestOrdered(0n,101n,[{position,payload_hex:hex(encodeLifeSet(1,5))}],'aa'.repeat(32));
+  images.push(h.snapshot());h=restore(h);h.seal(2n);h=restore(h);h=finish(h,1);h.publish(h.status().ready_hash);outputs.push(h.committed());
+ }
+ assert.deepEqual(images[0],images[1]);assert.deepEqual(images[1],images[2]);
+ assert.deepEqual(outputs[0],outputs[1]);assert.deepEqual(outputs[1],outputs[2]);
+});
