@@ -3,7 +3,7 @@
  * The root key is supplied by the deployment harness. This module never asks
  * an endpoint for a replacement root key and never disables time checks.
  */
-import {Actor,Certificate,HttpAgent,lookupResultToBuffer} from '@icp-sdk/core/agent';
+import {Actor,Certificate,HttpAgent,IC_ROOT_KEY,lookupResultToBuffer} from '@icp-sdk/core/agent';
 import {IDL} from '@icp-sdk/core/candid';
 import {Principal} from '@icp-sdk/core/principal';
 import {hex} from '../protocol/bytes.mjs';
@@ -19,11 +19,20 @@ function unsignedLeb128(bytes){
   throw new Error('certificate time encoding');
 }
 
-export function localCertificateVerifier(rootKey,{network='pocketic-local',maxAgeInMinutes=5}={}){
-  if(!(rootKey instanceof Uint8Array)||rootKey.length<32||rootKey.length>1024)throw new Error('configured root key bounds');
-  const pinnedRoot=Uint8Array.from(rootKey);
-  if(network!=='pocketic-local'||!Number.isFinite(maxAgeInMinutes)||maxAgeInMinutes<=0||maxAgeInMinutes>10)
-    throw new Error('local certificate policy');
+/** Configuration is trusted application input, never URL/query/server policy. */
+export function certificateRoot({network,rootKey}={}) {
+  if(network==='ic') {
+    if(rootKey!==undefined)throw new Error('mainnet root override forbidden');
+    return Uint8Array.from(IC_ROOT_KEY.match(/../g),part=>parseInt(part,16));
+  }
+  if(network!=='pocketic-local'||!(rootKey instanceof Uint8Array)||rootKey.length<32||rootKey.length>1024)
+    throw new Error('configured local root required');
+  return Uint8Array.from(rootKey);
+}
+export function certificateVerifier({network,rootKey,maxAgeInMinutes=5}={}){
+  const pinnedRoot=certificateRoot({network,rootKey});
+  if(!Number.isFinite(maxAgeInMinutes)||maxAgeInMinutes<=0||maxAgeInMinutes>10)
+    throw new Error('certificate freshness policy');
   return async (certificateBytes,deployment)=>{
     if(deployment.network!==network)throw new Error('certificate network mismatch');
     const canister=Principal.fromText(deployment.canister_id);
@@ -57,10 +66,12 @@ function safe(value,label){const n=Number(value);if(!Number.isSafeInteger(n)||n<
 /** Read-only actor for a specifically configured disposable local network.
  * The SDK receives the already pinned root and is forbidden from fetching a replacement.
  */
-export async function localLiveClient(rootKey,{network='pocketic-local',canister_id,host=globalThis.location?.origin}={}){
-  if(!(rootKey instanceof Uint8Array)||rootKey.length<32||rootKey.length>1024||network!=='pocketic-local'
-    ||typeof canister_id!=='string'||!canister_id||typeof host!=='string'||!host)throw new Error('local live client configuration');
-  const agent=await HttpAgent.create({host,rootKey:Uint8Array.from(rootKey),shouldFetchRootKey:false,shouldSyncTime:false,
+export async function liveClient({network,rootKey,canister_id,host=globalThis.location?.origin}={}){
+  const pinnedRoot=certificateRoot({network,rootKey});
+  if(typeof canister_id!=='string'||!canister_id||typeof host!=='string'||!host)throw new Error('live client configuration');
+  const endpoint=new URL(host);
+  if(network==='ic'&&(endpoint.protocol!=='https:'||endpoint.username||endpoint.password))throw new Error('mainnet endpoint policy');
+  const agent=await HttpAgent.create({host,rootKey:pinnedRoot,shouldFetchRootKey:false,shouldSyncTime:false,
     verifyQuerySignatures:true,retryTimes:1});
   const actor=Actor.createActor(idlFactory,{agent,canisterId:Principal.fromText(canister_id)});
   return Object.freeze({
@@ -75,4 +86,14 @@ export async function localLiveClient(rootKey,{network='pocketic-local',canister
     async chunk(segment,publication,kind,index){return Uint8Array.from(unwrap(await actor.retained_artifact_chunk(
       BigInt(safe(segment,'segment id')),publication,safe(kind,'artifact kind'),safe(index,'chunk index'))));},
   });
+}
+
+// Compatibility wrappers share the implementation; local roots never become mainnet roots.
+export function localCertificateVerifier(rootKey,options={}) {
+  if(options.network!==undefined&&options.network!=='pocketic-local')throw new Error('local certificate policy');
+  return certificateVerifier({...options,network:'pocketic-local',rootKey});
+}
+export async function localLiveClient(rootKey,options={}) {
+  if(options.network!==undefined&&options.network!=='pocketic-local')throw new Error('local live client configuration');
+  return liveClient({...options,network:'pocketic-local',rootKey});
 }

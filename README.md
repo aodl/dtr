@@ -20,3 +20,19 @@ The JavaScript package exposes explicit subpaths such as `@dtr/timeline-runtime/
 See [architecture and ownership](docs/ARCHITECTURE.md) and [extraction provenance](EXTRACTION.json).
 
 No registry package is published by this repository. A consumer must pin an immutable Git revision for the Rust crates and use a reviewed `npm pack` artifact for the JavaScript client.
+
+## S14 shared additions (local, unpublished)
+
+`IngestOrdered { start, end, inputs, anchor }` / JavaScript `ingestOrdered`
+admits at most 256 strictly ordered explicit positions in `[start,end)`.
+Admission is atomic with source progress; gaps describe the adapter's stream,
+not independently inspected global records. A zero-width range must retain its
+anchor; an advancing empty range may replace it. Existing dense admission and
+canonical public formats are unchanged.
+
+`certificateVerifier({network,rootKey})` and `liveClient({network,rootKey,
+canister_id,host})` share the existing certificate/observation implementation.
+`network: 'ic'` uses the SDK mainnet root and rejects `rootKey` overrides.
+`network: 'pocketic-local'` requires an explicit pinned root. Configuration is
+trusted deployment input, never query-string or server-selected policy.
+Compatibility local wrappers remain. Neither path fetches a root key.
