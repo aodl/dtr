@@ -220,6 +220,13 @@ pub enum Action {
         records: Vec<Option<String>>,
         anchor: String,
     },
+    /// Adapter-verified sparse range; gaps do not imply independently inspected records.
+    IngestOrdered {
+        start: Int,
+        end: Int,
+        inputs: Vec<Input>,
+        anchor: String,
+    },
     Seal {
         logical_end: Int,
     },
@@ -259,6 +266,27 @@ pub struct Coordinator<K: Kernel> {
     kernel: K,
 }
 
+/// One validation/transition for dense and ordered admission. A zero-width range
+/// must be empty and retain its anchor; an empty advancing range may change it.
+fn admit(i: &mut Inbox, start: &Int, end: &Int, inputs: Vec<Input>, anchor: String) -> Result<()> {
+    let from = number(start)?;
+    let to = number(end)?;
+    digest(&anchor)?;
+    if from != number(&i.cursor)? || inputs.len() > 256 {
+        return Err("source prefix/page".into());
+    }
+    input_root(&inputs, from, to)?;
+    if i.pending.len() + inputs.len() > 4096 {
+        return Err("inbox backpressure".into());
+    }
+    if from == to && anchor != i.source_anchor {
+        return Err("empty prefix anchor change".into());
+    }
+    i.pending.extend(inputs);
+    i.cursor = nat(to);
+    i.source_anchor = anchor;
+    inc(&mut i.revision)
+}
 fn selected(i: &Inbox, cutoff: u64) -> Result<Vec<Input>> {
     if cutoff < number(&i.retired_to)? || cutoff > number(&i.cursor)? {
         return Err("unverified cutoff".into());
@@ -462,36 +490,32 @@ impl<K: Kernel> Coordinator<K> {
                 records,
                 anchor,
             } => {
-                let i = &mut r.inbox;
-                digest(&anchor)?;
-                if number(&start)? != number(&i.cursor)? || records.len() > 256 {
+                if records.len() > 256 {
                     return Err("source prefix/page".into());
                 }
-                let end = number(&start)?
+                let from = number(&start)?;
+                let end = from
                     .checked_add(records.len() as u64)
                     .ok_or("source overflow")?;
-                let mut added = Vec::new();
-                for (offset, payload) in records.iter().enumerate() {
-                    if let Some(text) = payload {
-                        if unhex(text)?.len() > 1024 {
-                            return Err("input payload size".into());
-                        }
-                        added.push(Input {
-                            position: nat(number(&start)? + offset as u64),
-                            payload_hex: text.clone(),
-                        });
-                    }
-                }
-                if i.pending.len() + added.len() > 4096 {
-                    return Err("inbox backpressure".into());
-                }
-                if records.is_empty() && anchor != i.source_anchor {
-                    return Err("empty prefix anchor change".into());
-                }
-                i.pending.extend(added);
-                i.cursor = nat(end);
-                i.source_anchor = anchor;
-                inc(&mut i.revision)?;
+                let inputs = records
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(offset, payload)| {
+                        payload.map(|payload_hex| Input {
+                            position: nat(from + offset as u64),
+                            payload_hex,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                admit(&mut r.inbox, &start, &nat(end), inputs, anchor)?;
+            }
+            Action::IngestOrdered {
+                start,
+                end,
+                inputs,
+                anchor,
+            } => {
+                admit(&mut r.inbox, &start, &end, inputs, anchor)?;
             }
             Action::Seal { logical_end } => {
                 let j = &mut r.journal;

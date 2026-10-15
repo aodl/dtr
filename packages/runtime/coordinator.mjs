@@ -5,13 +5,22 @@
 import {AtomicJournalStore, SegmentJournal} from './journal.mjs';
 import {VerifiedInbox} from '../source/inbox.mjs';
 import {decodeCanonical, encodeCanonical} from './canonical.mjs';
-import {canonicalInputs, encodeSeal, makeSeal, manifest, sha256} from './seal.mjs';
+import {canonicalInputs, encodeSeal, makeSeal, manifest, sha256, inputRoot} from './seal.mjs';
 import {hex, unhex, uint} from '../protocol/bytes.mjs';
 
 export const COORDINATOR_VERSION = 5;
 export const MAX_COORDINATOR_BYTES = 8 * 1024 * 1024;
 const MAX_REVISION = Number.MAX_SAFE_INTEGER;
-const ACTION_KEYS={ingest:['kind','start','records','anchor'],seal:['kind','logical_end'],step:['kind','budget'],publish:['kind','manifest_hash']};
+const ACTION_KEYS={ingest:['kind','start','records','anchor'],ingest_ordered:['kind','start','end','inputs','anchor'],seal:['kind','logical_end'],step:['kind','budget'],publish:['kind','manifest_hash']};
+function admit(i,start,end,inputs,anchor) {
+  unhex(anchor,32);
+  if(start!==i.cursor||!Array.isArray(inputs)||inputs.length>256)throw new Error('source prefix/page');
+  for(const input of inputs)if(!input||Object.keys(input).sort().join(',')!=='payload_hex,position')throw new Error('input schema');
+  inputRoot(inputs,start,end);
+  if(i.pending.length+inputs.length>4096)throw new Error('inbox backpressure');
+  if(start===end&&anchor!==i.source_anchor)throw new Error('empty prefix anchor change');
+  i.pending.push(...structuredClone(inputs));i.cursor=end;i.source_anchor=anchor;i.revision++;
+}
 function checkRevision(n) {
   if (!Number.isSafeInteger(n) || n < 0 || n > MAX_REVISION) throw new Error('coordinator revision');
 }
@@ -110,9 +119,11 @@ export class TimelineCoordinator {
           if (unhex(records[n]).length>1024) throw new Error('input payload size');
           pending.push({position:start+BigInt(n),payload_hex:records[n]});
         }
-        if (i.pending.length+pending.length>4096) throw new Error('inbox backpressure');
-        if (!records.length && action.anchor!==i.source_anchor) throw new Error('empty prefix anchor change');
-        i.pending.push(...pending); i.cursor=end; i.source_anchor=action.anchor; i.revision++;
+        admit(i,start,end,pending,action.anchor);
+        break;
+      }
+      case 'ingest_ordered': {
+        admit(i,uint(action.start),uint(action.end),action.inputs,action.anchor);
         break;
       }
       case 'seal': {
@@ -189,6 +200,7 @@ export class TimelineCoordinator {
   }
   apply(action,fault=null) {return this.commit(this.propose(action),fault);}
   ingestPrefix(start,records,anchor,fault=null) {return this.apply({kind:'ingest',start,records,anchor},fault);}
+  ingestOrdered(start,end,inputs,anchor,fault=null) {return this.apply({kind:'ingest_ordered',start,end,inputs,anchor},fault);}
   seal(logicalEnd,fault=null) {return this.apply({kind:'seal',logical_end:logicalEnd},fault);}
   advance(budget,fault=null) {return this.apply({kind:'step',budget},fault);}
   publish(manifestHash,fault=null) {return this.apply({kind:'publish',manifest_hash:manifestHash},fault);}

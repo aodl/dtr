@@ -161,3 +161,76 @@ fn publication_contains_only_committed_data() {
     assert_eq!(before.artifacts, during.artifacts);
     assert_eq!(before.sha256, during.sha256);
 }
+
+fn ordered(start: u64, end: u64, positions: &[u64]) -> Action {
+    Action::IngestOrdered {
+        start: Int(start.into()),
+        end: Int(end.into()),
+        anchor: "aa".repeat(32),
+        inputs: positions
+            .iter()
+            .map(|p| Input {
+                position: Int((*p).into()),
+                payload_hex: "ab".into(),
+            })
+            .collect(),
+    }
+}
+#[test]
+fn sparse_admission_survives_restore_and_stale_fences() {
+    let mut h = fresh();
+    let stale = h.propose(ordered(0, 801, &[100, 109, 800])).unwrap();
+    h.apply(ordered(0, 801, &[100, 109, 800])).unwrap();
+    load(&mut h);
+    let saved = h.snapshot().unwrap();
+    assert!(h.commit(stale).is_err());
+    assert!(h.apply(ordered(0, 801, &[100, 109, 800])).is_err());
+    assert_eq!(h.snapshot().unwrap(), saved);
+    h.apply(Action::Seal {
+        logical_end: Int::from(1),
+    })
+    .unwrap();
+    assert_eq!(h.record.journal.stage.as_ref().unwrap().inputs.len(), 3);
+    h.apply(ordered(801, 1_000_000_000, &[])).unwrap();
+    load(&mut h);
+}
+#[test]
+fn invalid_sparse_admission_is_atomic() {
+    let mut h = fresh();
+    let saved = h.snapshot().unwrap();
+    for action in [
+        ordered(1, 2, &[1]),
+        ordered(0, 2, &[1, 1]),
+        ordered(0, 3, &[2, 1]),
+        ordered(0, 2, &[2]),
+        ordered(0, 0, &[0]),
+        ordered(0, 0, &[]),
+        ordered(0, 2, &vec![1; 257]),
+    ] {
+        assert!(h.apply(action).is_err());
+        assert_eq!(h.snapshot().unwrap(), saved);
+    }
+    let mut overflow = ordered(0, 1, &[]);
+    if let Action::IngestOrdered { end, .. } = &mut overflow {
+        *end = Int((u128::from(u64::MAX) + 1).into());
+    }
+    assert!(h.apply(overflow).is_err());
+    let mut large = ordered(0, 1, &[0]);
+    if let Action::IngestOrdered { inputs, .. } = &mut large {
+        inputs[0].payload_hex = "ff".repeat(1025);
+    }
+    assert!(h.apply(large).is_err());
+    assert_eq!(h.snapshot().unwrap(), saved);
+    for n in 0..16 {
+        let start = n * 256;
+        h.apply(ordered(
+            start,
+            start + 256,
+            &(start..start + 256).collect::<Vec<_>>(),
+        ))
+        .unwrap();
+    }
+    let full = h.snapshot().unwrap();
+    assert!(h.apply(ordered(4096, 4097, &[4096])).is_err());
+    assert_eq!(h.snapshot().unwrap(), full);
+}
