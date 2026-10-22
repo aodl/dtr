@@ -1,8 +1,9 @@
 /** Bounded flat hash catalog. This producer does not sign or certify anything. */
+import {validateEpochHead} from '../runtime/epoch.mjs';
 import {encodeCanonical,cloneCanonical} from '../runtime/canonical.mjs';
 import {sha256,manifest} from '../runtime/seal.mjs';
-import {unhex} from '../protocol/bytes.mjs';
-export const PUBLICATION_VERSION=6,CHUNK_BYTES=16384,MAX_ARTIFACT_BYTES=1024*1024,MAX_PUBLICATION_BYTES=65536;
+import {hex,unhex} from '../protocol/bytes.mjs';
+export const PUBLICATION_VERSION=7,CHUNK_BYTES=16384,MAX_ARTIFACT_BYTES=1024*1024,MAX_PUBLICATION_BYTES=65536;
 export const KINDS=['state','events','scores'];
 export function describeArtifact(kind,bytes){
   if(![...KINDS,'render'].includes(kind)||!(bytes instanceof Uint8Array)||bytes.length>MAX_ARTIFACT_BYTES)throw new Error('observation artifact bounds');
@@ -12,17 +13,19 @@ export function describeArtifact(kind,bytes){
 /** v6 identity depends only on the committed head, never ingestion or private work.
  * render is a bounded, game-specific projection; it does NOT replace consensus events.
  */
-export function publication(record,{version=6,render=null}={}){
-  if(![5,6].includes(version))throw new Error('observation publication version');
+export function publication(record,{version=record.journal.epoch?7:6,render=null}={}){
+  if(![5,6,7].includes(version)||Boolean(record.journal.epoch)!==(version===7))throw new Error('observation publication version');
   if(version===5&&render!==null)throw new Error('legacy projection unsupported');
-  if(record.version!==5)throw new Error('observation coordinator version');
+  if(![5,6].includes(record.version)||(record.version===6)!==Boolean(record.journal.epoch))throw new Error('observation coordinator version');
   const h=record.journal.head,artifacts=[unhex(h.state_hex),unhex(h.event_hex),unhex(h.score_hex)];
   if(sha256(artifacts[0])!==h.state_hash)throw new Error('observation state root');
+  if(record.journal.epoch)validateEpochHead(record.journal.epoch,h,record.journal.identity);
   if(h.seal&&manifest(h.seal,...artifacts).manifest_hash!==h.manifest_hash)throw new Error('observation manifest root');
   const data={version,...(version===5?{revision:record.revision,ingest_head:record.inbox.cursor}:{}),identity:cloneCanonical(record.journal.identity),head:{segment_id:h.segment_id,logical_end:h.logical_end,
       source_to_exclusive:h.source_to_exclusive,manifest_hash:h.manifest_hash,state_hash:h.state_hash,seal:cloneCanonical(h.seal)},
     chunk_bytes:CHUNK_BYTES,artifacts:KINDS.map((k,i)=>describeArtifact(k,artifacts[i]))};
-  if(version===6){
+  if(version>=6){
+    if(version===7)data.epoch=cloneCanonical(record.journal.epoch);
     data.render_format=null;
     if(render!==null){
       if(!render||Object.keys(render).sort().join(',')!=='bytes,format'
@@ -59,17 +62,18 @@ export class PublicationWindow {
     this.maxSegments=maxSegments;this.maxBytes=maxBytes;
   }
   retain(record,options={}){
-    const p=publication(record,options);if(p.data.version!==6)throw new Error('retention requires publication v6');
+    const p=publication(record,options);if(![6,7].includes(p.data.version))throw new Error('retention requires publication v6/v7');
     if(this.#items.has(p.sha256))return p.sha256;
     const size=p.bytes.length+p.artifacts.reduce((n,b)=>n+b.length,0);
     if(size>this.maxBytes)throw new Error('publication exceeds retention byte capacity');
     if(this.#last){
       const a=this.#last.data,b=p.data,x=a.head,y=b.head;
-      if(Object.keys(a.identity).some(k=>a.identity[k]!==b.identity[k])||a.render_format!==b.render_format)throw new Error('retention identity changed');
+      const crossing=a.version===6&&b.version===7&&b.head.seal===null&&b.epoch.previous_publication_hex===hex(this.#last.bytes);
+      if(!crossing&&(Object.keys(a.identity).some(k=>a.identity[k]!==b.identity[k])||a.version!==b.version||a.epoch?.transition_hash!==b.epoch?.transition_hash)||a.render_format!==b.render_format)throw new Error('retention identity changed');
       const next=x.segment_id===null?0n:x.segment_id+1n;
       if(y.segment_id===null||y.segment_id<next)throw new Error('retention rollback/conflicting segment');
-      if(y.segment_id!==next||y.seal.previous_manifest!==x.manifest_hash||y.seal.previous_state!==x.state_hash
-        ||y.seal.logical_start!==x.logical_end||y.seal.source_from!==x.source_to_exclusive)throw new Error('retention requires consecutive committed segments');
+      if(!crossing&&(y.segment_id!==next||y.seal.previous_manifest!==x.manifest_hash||y.seal.previous_state!==x.state_hash
+        ||y.seal.logical_start!==x.logical_end||y.seal.source_from!==x.source_to_exclusive))throw new Error('retention requires consecutive committed segments');
     }
     while(this.#items.size>=this.maxSegments||this.#bytes+size>this.maxBytes){
       const key=this.#items.keys().next().value,old=this.#items.get(key);this.#bytes-=old.size;this.#items.delete(key);

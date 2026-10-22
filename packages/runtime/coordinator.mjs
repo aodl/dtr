@@ -2,16 +2,18 @@
  * Trusted host API: ingestPrefix is NOT a ledger verifier or a public user method.
  * The backing store must atomically commit the whole replacement, or retain the old one.
  */
+import {makeEpoch,validateEpoch,epochOutput} from './epoch.mjs';
+import {publication} from '../observation/publication.mjs';
 import {AtomicJournalStore, SegmentJournal} from './journal.mjs';
 import {VerifiedInbox} from '../source/inbox.mjs';
 import {decodeCanonical, encodeCanonical} from './canonical.mjs';
 import {canonicalInputs, encodeSeal, makeSeal, manifest, sha256, inputRoot} from './seal.mjs';
 import {hex, unhex, uint} from '../protocol/bytes.mjs';
 
-export const COORDINATOR_VERSION = 5;
+export const COORDINATOR_VERSION = 6; // Legacy histories remain record v5 until an explicit transition.
 export const MAX_COORDINATOR_BYTES = 8 * 1024 * 1024;
 const MAX_REVISION = Number.MAX_SAFE_INTEGER;
-const ACTION_KEYS={ingest:['kind','start','records','anchor'],ingest_ordered:['kind','start','end','inputs','anchor'],seal:['kind','logical_end'],step:['kind','budget'],publish:['kind','manifest_hash']};
+const ACTION_KEYS={ingest:['kind','start','records','anchor'],ingest_ordered:['kind','start','end','inputs','anchor'],seal:['kind','logical_end'],step:['kind','budget'],publish:['kind','manifest_hash'],transition:['kind','epoch','state_hex','event_hex','score_hex']};
 function admit(i,start,end,inputs,anchor) {
   unhex(anchor,32);
   if(start!==i.cursor||!Array.isArray(inputs)||inputs.length>256)throw new Error('source prefix/page');
@@ -33,13 +35,13 @@ function stores(record, kernel) {
 }
 function validate(record, kernel) {
   if (!record || Object.keys(record).sort().join(',') !== 'inbox,journal,revision,version'
-      || record.version !== COORDINATOR_VERSION) throw new Error('coordinator schema');
+      || ![5,6].includes(record.version) || (record.version===6)!==Boolean(record.journal.epoch)) throw new Error('coordinator schema');
   checkRevision(record.revision);
   checkRevision(record.journal.revision); checkRevision(record.journal.fence); checkRevision(record.inbox.revision);
   const pair = stores(record, kernel), j = record.journal, i = record.inbox;
   if (j.identity.source_id !== i.source_id || uint(j.head.source_to_exclusive) !== uint(i.retired_to))
     throw new Error('coordinator source/head divergence');
-  if (i.last_ack !== (j.head.seal === null ? null : j.head.manifest_hash)) throw new Error('coordinator acknowledgement divergence');
+  if (i.last_ack !== (j.head.seal === null && !j.epoch ? null : j.head.manifest_hash)) throw new Error('coordinator acknowledgement divergence');
   if (Boolean(j.stage) !== Boolean(i.reservation)) throw new Error('coordinator reservation divergence');
   if (j.stage) {
     if (sha256(encodeSeal(j.stage.seal)) !== i.reservation.seal_hash
@@ -59,10 +61,10 @@ class CoordinatorStore {
   read() { return structuredClone(this.#record); }
   get revision() { return this.#record.revision; }
   committed() {return structuredClone(this.#record.journal.head);}
-  publicRecord() {return structuredClone({version:5,journal:{identity:this.#record.journal.identity,head:this.#record.journal.head}});}
+  publicRecord() {const r=this.#record;return structuredClone({version:r.version,journal:{identity:r.journal.identity,head:r.journal.head,...(r.journal.epoch?{epoch:r.journal.epoch}:{})}});}
   status() {
     const r=this.#record;
-    return {version:5,revision:r.revision,phase:r.journal.stage?.phase??'idle',ingest_head:r.inbox.cursor,
+    return {version:r.version,revision:r.revision,phase:r.journal.stage?.phase??'idle',ingest_head:r.inbox.cursor,
       retired_to:r.inbox.retired_to,pending_inputs:r.inbox.pending.length,segment_id:r.journal.head.segment_id,
       logical_end:r.journal.head.logical_end,manifest_hash:r.journal.head.manifest_hash,ready_hash:r.journal.stage?.ready_hash??null};
   }
@@ -102,6 +104,13 @@ export class TimelineCoordinator {
   /** Public producer input without private cursor/inbox payload copies. */
   publicationRecord() {return this.store.publicRecord();}
   status() {return this.store.status();}
+  prepareTransition(identity,out,metadataHash){
+    const r=this.store.read();this.#transitionBoundary(r);
+    return makeEpoch(publication(r).bytes,identity,out,r.inbox.source_anchor,metadataHash);
+  }
+  #transitionBoundary(r){const j=r.journal,i=r.inbox;
+    if(j.epoch||j.stage||i.reservation||i.pending.length||i.cursor!==i.retired_to||i.cursor!==j.head.source_to_exclusive||!j.head.seal)throw new Error('epoch requires drained committed boundary');
+  }
   /** Trusted synchronous orchestration; one outer fence, no nested store transactions. */
   propose(action) {
     const allowed=ACTION_KEYS[action?.kind];
@@ -111,6 +120,17 @@ export class TimelineCoordinator {
     if ([r.revision,j.revision,j.fence,i.revision].some(n=>n===MAX_REVISION)) throw new Error('coordinator revision exhausted');
     let progress=null, unchanged=false, cursor=null;
     switch(action.kind) {
+      case 'transition': {
+        const e=structuredClone(action.epoch),out={state:unhex(action.state_hex),events:unhex(action.event_hex),scores:unhex(action.score_hex)};
+        validateEpoch(e);epochOutput(e,out);
+        if(j.epoch){if(!same(j.epoch,e))throw new Error('only one epoch crossing per history');unchanged=true;break;}
+        this.#transitionBoundary(r);
+        if(e.previous_publication_hex!==hex(publication(r).bytes)||e.source_cursor!==i.cursor||e.source_anchor!==i.source_anchor)throw new Error('epoch expected predecessor/source');
+        r.version=6;j.version=3;j.identity=structuredClone(e.new_identity);j.epoch=e;
+        j.head={segment_id:e.segment_id,logical_end:e.logical_boundary,source_to_exclusive:e.source_cursor,
+          manifest_hash:e.transition_hash,state_hash:e.state_hash,state_hex:action.state_hex,seal:null,event_hex:action.event_hex,score_hex:action.score_hex};
+        i.last_ack=e.transition_hash;j.fence++;j.revision++;i.revision++;break;
+      }
       case 'ingest': {
         const start=uint(action.start), records=action.records; unhex(action.anchor,32);
         if (start!==i.cursor || !Array.isArray(records) || records.length>256) throw new Error('source prefix/page');
@@ -133,7 +153,7 @@ export class TimelineCoordinator {
         const seal=makeSeal({...j.identity, segment_id:h.segment_id===null?0n:h.segment_id+1n,
           logical_start:h.logical_end,logical_end:uint(action.logical_end),source_from:h.source_to_exclusive,
           source_to_exclusive:i.cursor,source_anchor:i.source_anchor,previous_state:h.state_hash,
-          previous_manifest:h.manifest_hash},inputs,i.cursor);
+          previous_manifest:h.manifest_hash,...(j.epoch?{epoch_hash:j.epoch.transition_hash}:{})},inputs,i.cursor);
         // A thrown begin/snapshot leaves the authoritative input reservation untouched.
         cursor=this.kernel.begin(unhex(h.state_hex), inputs, seal);
         const saved=cursor.snapshot(); j.fence++; j.revision++;

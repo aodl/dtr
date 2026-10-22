@@ -22,7 +22,7 @@ export function makeSeal(fields, inputs, verifiedCursor) {
 export function checkSuccessor(previous, next, previousManifestHash, previousStateHash) {
   encodeSeal(previous);encodeSeal(next);
   if (uint(next.segment_id)!==uint(previous.segment_id)+1n || uint(next.logical_start)!==uint(previous.logical_end)
-      || uint(next.source_from)!==uint(previous.source_to_exclusive) || next.source_id!==previous.source_id
+      || uint(next.source_from)!==uint(previous.source_to_exclusive) || next.source_id!==previous.source_id || next.epoch_hash!==previous.epoch_hash
       || next.previous_manifest!==previousManifestHash || next.previous_state!==previousStateHash) throw new Error('broken seal chain');
 }
 export function manifest(seal, stateBytes, eventBytes, scoreBytes) {

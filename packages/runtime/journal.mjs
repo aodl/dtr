@@ -1,3 +1,4 @@
+import {validateEpochHead} from './epoch.mjs';
 import {cloneCanonical, decodeCanonical, encodeCanonical} from './canonical.mjs';
 import {hex, unhex, uint} from '../protocol/bytes.mjs';
 import {canonicalInputs, checkSuccessor, encodeSeal, inputRoot, manifest, sha256} from './seal.mjs';
@@ -58,18 +59,20 @@ export class SegmentJournal {
   }
   validate() {
     const r = this.store.read();
-    if (r.version !== 2 || !Number.isSafeInteger(r.revision) || r.revision < 0
+    if (!((r.version===2&&!Object.hasOwn(r,'epoch'))||(r.version===3&&r.epoch)) || !Number.isSafeInteger(r.revision) || r.revision < 0
         || !Number.isSafeInteger(r.fence) || r.fence < 0) throw new Error('journal schema');
     validateIdentity(r.identity);
     if (sha256(unhex(r.head.state_hex)) !== r.head.state_hash) throw new Error('committed state mismatch');
     uint(r.head.logical_end); uint(r.head.source_to_exclusive); unhex(r.head.manifest_hash, 32);
+    if(r.epoch)validateEpochHead(r.epoch,r.head,r.identity);
     if (r.head.seal !== null) {
+      if(r.head.seal.epoch_hash!==r.epoch?.transition_hash)throw new Error('seal epoch mismatch');
       matchIdentity(r.identity, r.head.seal);
       const m = manifest(r.head.seal, unhex(r.head.state_hex), unhex(r.head.event_hex), unhex(r.head.score_hex));
       if (m.manifest_hash !== r.head.manifest_hash || r.head.segment_id !== uint(r.head.seal.segment_id)
           || r.head.logical_end !== uint(r.head.seal.logical_end)
           || r.head.source_to_exclusive !== uint(r.head.seal.source_to_exclusive)) throw new Error('committed manifest mismatch');
-    } else if (r.head.segment_id !== null || r.head.manifest_hash !== '00'.repeat(32)) throw new Error('genesis head');
+    } else if (!r.epoch && (r.head.segment_id !== null || r.head.manifest_hash !== '00'.repeat(32))) throw new Error('genesis head');
     if (r.stage) {
       this.validateSeal(r, r.stage.seal, r.stage.inputs);
       if (r.stage.fence !== r.fence || !['running','ready'].includes(r.stage.phase)) throw new Error('stage fence/phase');
@@ -84,10 +87,11 @@ export class SegmentJournal {
   }
   validateSeal(record, seal, inputs) {
     seal = normalizedSeal(seal); matchIdentity(record.identity, seal);
+    if(seal.epoch_hash!==record.epoch?.transition_hash)throw new Error('seal epoch mismatch');
     if (seal.previous_state !== record.head.state_hash || seal.previous_manifest !== record.head.manifest_hash)
       throw new Error('seal previous commitment');
     if (record.head.seal) checkSuccessor(record.head.seal, seal, record.head.manifest_hash, record.head.state_hash);
-    else if (seal.segment_id !== 0n || seal.logical_start !== record.head.logical_end
+    else if (seal.segment_id !== (record.head.segment_id===null?0n:record.head.segment_id+1n) || seal.logical_start !== record.head.logical_end
       || seal.source_from !== record.head.source_to_exclusive) throw new Error('genesis seal');
     if (seal.input_count !== inputs.length || inputRoot(inputs, seal.source_from, seal.source_to_exclusive) !== seal.input_root)
       throw new Error('sealed input mismatch');

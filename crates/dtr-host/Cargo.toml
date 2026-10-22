@@ -10,3 +10,7 @@ dtr-wire = { path = "../dtr-wire" }
 serde.workspace = true
 serde_json.workspace = true
 num-traits.workspace = true
+
+[dev-dependencies]
+dtr-core = { path = "../dtr-core" }
+life-conformance = { path = "../../examples/competitive-life" }
