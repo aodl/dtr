@@ -1,3 +1,17 @@
+# Current status — local master prepared, 2026-10-22
+
+Local `master` is based directly on published S14 `1f47c1a0a104875bd13475d561b8d5aa10770d99`. The historical status below predates that publication. Current B2Z consumes this exact Rust revision and packaged client 0.12.0; its vendor artifact SHA-256 is `933f42b1187c45083c4f6c69e6851fe2c77e15e8fa8fd198e13187ad3ff13d8f`.
+
+Audit: three local branches before cleanup, three matching local remote-tracking refs, one clean worktree, no transition implementation in reachable commits, uncommitted files or candidate paths. The only unreachable commit, `87d0b05bd162da200b27f45dacfed7639ecac844`, is the pre-amend S14 normalization correction; its code is identical to `1f47c1a` and only STATUS differs. No authenticated history/schema transition has been implemented or discovered. Current host Action remains Ingest/IngestOrdered/Seal/Step/Publish. Do not claim an unpublished transition pin.
+
+Local validation at S14: 191 JS and 31 Rust tests PASS, formatting and Clippy PASS, locked/offline Cargo. Raw evidence: `.work/branch-cleanup/`. No DTR code, dependencies or public encodings change in this cleanup.
+
+Immutable local annotated tags `dtr-s14-0.12.0` and `dtr-s11-extraction` retain the published milestones. Existing branches are not deleted, rewritten or force-updated. Remote state is the user-verified inventory plus matching cached tracking refs; no fetch/ls-remote/push or GitHub setting change was performed.
+
+User sequence: push `master` without force; push both milestone tags; change GitHub's default branch to `master`; verify S14 remains an ancestor and tags resolve correctly; only then optionally prune obsolete checkpoint/main branches through a separate user review. Keep `master` for supported releases, temporary feature branches while active, permanent tags for pinned milestones. Do not change consumer pins for branch spelling. The history/schema transition remains future separately scoped work.
+
+---
+
 # Current status — S14 shared changes, local and unpublished
 
 DTR remains generic and independent of BTZ. The S11 implementation pin `71e59e93cf49a3656689679b538b4c3f138787f8` remains the published dependency consumed by BTZ until the user publishes and the consumer pins are deliberately updated.
