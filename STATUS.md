@@ -1,3 +1,23 @@
+# Authenticated epoch candidate — local, not published
+
+Branch `checkpoint/authenticated-epoch-transition` descends from local master
+`1649788` and published S14 `1f47c1a`. It implements the single generic v6→v7
+checkpoint described in [the wire contract](docs/EPOCH_TRANSITION.md), package
+0.13.0. Historical S14 and prior release tags are unchanged. The branch-cleanup
+inventory below is historical evidence from before this implementation.
+
+Local gates: 199 JavaScript tests, 35 Rust tests (locked/offline), format and
+Clippy with warnings denied. Shared Rust/JS byte fixture and independent Life
+checks cover the new boundary. Raw results: `.work/epoch/`. B2Z installed-IC
+consumer/transition verification is a separate required gate. No consumer may
+claim this candidate as a published immutable remote pin before user publication.
+
+User publication: push this feature branch without force; after CI and consumer
+review, fast-forward supported master and retain a release tag. No remote Git
+operation, package publication or mainnet action was performed for this candidate.
+
+---
+
 # Current status — local master prepared, 2026-10-22
 
 Local `master` is based directly on published S14 `1f47c1a0a104875bd13475d561b8d5aa10770d99`. The historical status below predates that publication. Current B2Z consumes this exact Rust revision and packaged client 0.12.0; its vendor artifact SHA-256 is `933f42b1187c45083c4f6c69e6851fe2c77e15e8fa8fd198e13187ad3ff13d8f`.

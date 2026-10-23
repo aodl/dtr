@@ -1,6 +1,6 @@
 # Deterministic Timeline Runtime
 
-DTR is the reusable infrastructure extracted from the tested BTZ S10 implementation. It provides canonical deterministic encodings, checkpoint seals, a bounded atomic coordinator, resumable-kernel interfaces, source fencing models, publication-v6 construction and verification, retained-publication chaining, anti-rollback sequencing and adaptive playout buffering.
+DTR is the reusable infrastructure extracted from the tested BTZ S10 implementation. It provides canonical deterministic encodings, checkpoint seals, a bounded atomic coordinator, resumable-kernel interfaces, source fencing models, publication-v6/v7 construction and verification, retained-publication chaining, anti-rollback sequencing and adaptive playout buffering.
 
 DTR deliberately does not contain BTZ mechanics, payments, pricing, animation projection, rendering, ledger classification or a concrete canister application. `examples/competitive-life` is the small second-kernel boundary test.
 
@@ -21,7 +21,7 @@ See [architecture and ownership](docs/ARCHITECTURE.md) and [extraction provenanc
 
 No registry package is published by this repository. A consumer must pin an immutable Git revision for the Rust crates and use a reviewed `npm pack` artifact for the JavaScript client.
 
-## S14 shared additions (local, unpublished)
+## S14 shared additions (published at 1f47c1a)
 
 `IngestOrdered { start, end, inputs, anchor }` / JavaScript `ingestOrdered`
 admits at most 256 strictly ordered explicit positions in `[start,end)`.
@@ -36,3 +36,7 @@ canister_id,host})` share the existing certificate/observation implementation.
 `network: 'pocketic-local'` requires an explicit pinned root. Configuration is
 trusted deployment input, never query-string or server-selected policy.
 Compatibility local wrappers remain. Neither path fetches a root key.
+
+## Authenticated epoch checkpoint (0.13.0 candidate)
+
+See [the epoch wire and host contract](docs/EPOCH_TRANSITION.md). One explicit, drained v6 → v7 boundary can change application identity and state without rewriting historical seals or publications. This candidate requires consumer and installed-IC verification before deployment.

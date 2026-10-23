@@ -1,4 +1,5 @@
 //! Flat catalog covered by one certified-data root. No certificate or signature generation here.
+use crate::epoch::Epoch;
 use crate::{manifest, Head, Identity, Output, Record, Seal};
 use dtr_wire::{encode, hash, unhex, Int, Result};
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,8 @@ pub struct Publication {
     pub head: PublicHead,
     pub chunk_bytes: usize,
     pub artifacts: Vec<Descriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<Epoch>,
 }
 pub struct Published {
     pub data: Publication,
@@ -63,7 +66,10 @@ pub fn describe(kind: &str, bytes: &[u8]) -> Result<Descriptor> {
     })
 }
 pub fn publication(r: &Record) -> Result<Published> {
-    if r.version != 5 {
+    if !matches!(
+        (r.version, r.journal.epoch.is_some()),
+        (5, false) | (6, true)
+    ) {
         return Err("observation coordinator version".into());
     }
     let h = &r.journal.head;
@@ -74,6 +80,9 @@ pub fn publication(r: &Record) -> Result<Published> {
     ];
     if hash(&artifacts[0]) != h.state_hash {
         return Err("observation state root".into());
+    }
+    if let Some(e) = &r.journal.epoch {
+        e.validate_head(h, &r.journal.identity)?;
     }
     if let Some(s) = &h.seal {
         let out = Output {
@@ -92,12 +101,13 @@ pub fn publication(r: &Record) -> Result<Published> {
         .map(|(k, b)| describe(k, b))
         .collect::<Result<Vec<_>>>()?;
     let data = Publication {
-        version: 6,
+        version: if r.journal.epoch.is_some() { 7 } else { 6 },
         identity: r.journal.identity.clone(),
         render_format: None,
         head: PublicHead::from(h),
         chunk_bytes: CHUNK,
         artifacts: descriptions,
+        epoch: r.journal.epoch.clone(),
     };
     let bytes = encode(&data)?;
     if bytes.len() > MAX_PUBLICATION {
@@ -113,6 +123,9 @@ pub fn publication(r: &Record) -> Result<Published> {
 
 /// Historical v5 fixture codec only. Not used by the current IC lab or observer.
 pub fn publication_v5_bytes(r: &Record) -> Result<Vec<u8>> {
+    if r.journal.epoch.is_some() {
+        return Err("legacy publication cannot encode epoch".into());
+    }
     let v = publication(r)?;
     let old = serde_json::json!({"version":5,"revision":r.revision,"identity":r.journal.identity,
         "ingest_head":r.inbox.cursor,"head":v.data.head,"chunk_bytes":CHUNK,"artifacts":v.data.artifacts});

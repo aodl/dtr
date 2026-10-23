@@ -4,6 +4,8 @@
 use dtr_wire::{decode, encode, hash, hex, unhex, Int, Result};
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
+pub mod epoch;
+use epoch::Epoch;
 
 const SAFE: u64 = (1u64 << 53) - 1;
 pub const MAX_IMAGE: usize = 8 * 1024 * 1024;
@@ -60,6 +62,8 @@ pub struct Seal {
     pub previous_state: String,
     pub previous_manifest: String,
     pub input_root: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch_hash: Option<String>,
 }
 impl Seal {
     pub fn bytes(&self) -> Result<Vec<u8>> {
@@ -75,7 +79,11 @@ impl Seal {
         {
             return Err("seal bounds".into());
         }
-        let mut b = b"DTRSEAL1".to_vec();
+        let mut b = if self.epoch_hash.is_some() {
+            b"DTRSEAL2".to_vec()
+        } else {
+            b"DTRSEAL1".to_vec()
+        };
         for n in [id, start, end, from, to] {
             b.extend_from_slice(&n.to_be_bytes());
         }
@@ -91,6 +99,9 @@ impl Seal {
             &self.input_root,
         ] {
             b.extend(digest(s)?);
+        }
+        if let Some(epoch) = &self.epoch_hash {
+            b.extend(digest(epoch)?);
         }
         Ok(b)
     }
@@ -130,6 +141,14 @@ pub struct Manifest {
     pub event_hash: String,
     pub score_hash: String,
     pub manifest_hash: String,
+}
+pub(crate) fn manifest_root(seal: &Seal, hashes: [&String; 3]) -> Result<String> {
+    let mut b = b"DTRMANI1".to_vec();
+    b.extend(digest(&hash(&seal.bytes()?))?);
+    for h in hashes {
+        b.extend(digest(h)?);
+    }
+    Ok(hash(&b))
 }
 pub fn manifest(seal: &Seal, out: &Output) -> Result<Manifest> {
     let hashes = [
@@ -184,6 +203,8 @@ pub struct Journal {
     pub fence: u64,
     pub stage: Option<Stage>,
     pub head: Head,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<Epoch>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -235,6 +256,12 @@ pub enum Action {
     },
     Publish {
         manifest_hash: String,
+    },
+    Transition {
+        epoch: Box<Epoch>,
+        state_hex: String,
+        event_hex: String,
+        score_hex: String,
     },
 }
 #[derive(Clone, Debug)]
@@ -302,6 +329,7 @@ fn selected(i: &Inbox, cutoff: u64) -> Result<Vec<Input>> {
 fn validate_seal(j: &Journal, s: &Seal, inputs: &[Input]) -> Result<()> {
     s.bytes()?;
     if !s.matches(&j.identity)
+        || s.epoch_hash.as_ref() != j.epoch.as_ref().map(|e| &e.transition_hash)
         || s.previous_state != j.head.state_hash
         || s.previous_manifest != j.head.manifest_hash
         || s.logical_start != j.head.logical_end
@@ -364,6 +392,7 @@ impl<K: Kernel> Coordinator<K> {
             fence: 0,
             stage: None,
             head,
+            epoch: None,
         };
         let c = Self {
             record: Record {
@@ -386,6 +415,9 @@ impl<K: Kernel> Coordinator<K> {
             kernel,
         };
         c.validate()?;
+        if encode(&c.record)? != bytes {
+            return Err("coordinator schema encoding".into());
+        }
         Ok(c)
     }
     pub fn snapshot(&self) -> Result<Vec<u8>> {
@@ -402,9 +434,10 @@ impl<K: Kernel> Coordinator<K> {
         let j = &r.journal;
         let i = &r.inbox;
         let h = &j.head;
-        if r.version != 5
-            || j.version != 2
-            || i.version != 2
+        if !matches!(
+            (r.version, j.version, j.epoch.is_some()),
+            (5, 2, false) | (6, 3, true)
+        ) || i.version != 2
             || [r.revision, j.revision, j.fence, i.revision]
                 .iter()
                 .any(|n| *n > SAFE)
@@ -429,7 +462,13 @@ impl<K: Kernel> Coordinator<K> {
         if hash(&unhex(&h.state_hex)?) != h.state_hash {
             return Err("committed state mismatch".into());
         }
+        if let Some(e) = &j.epoch {
+            e.validate_head(h, &j.identity)?;
+        }
         if let Some(s) = &h.seal {
+            if s.epoch_hash.as_ref() != j.epoch.as_ref().map(|e| &e.transition_hash) {
+                return Err("seal epoch mismatch".into());
+            }
             let out = Output {
                 state: unhex(&h.state_hex)?,
                 events: unhex(&h.event_hex)?,
@@ -443,6 +482,12 @@ impl<K: Kernel> Coordinator<K> {
                 || i.last_ack.as_ref() != Some(&h.manifest_hash)
             {
                 return Err("committed manifest/ack mismatch".into());
+            }
+        } else if let Some(e) = &j.epoch {
+            if h.segment_id.as_ref() != Some(&e.segment_id)
+                || i.last_ack.as_ref() != Some(&e.transition_hash)
+            {
+                return Err("epoch acknowledgement".into());
             }
         } else if h.segment_id.is_some() || h.manifest_hash != ZERO || i.last_ack.is_some() {
             return Err("genesis head".into());
@@ -475,6 +520,40 @@ impl<K: Kernel> Coordinator<K> {
         }
         Ok(())
     }
+    /// Trusted application supplies transformed bytes; no kernel/game semantics live here.
+    /// The caller must validate its state transformation before requesting this commitment.
+    pub fn prepare_transition(
+        &self,
+        identity: Identity,
+        out: &Output,
+        metadata_hash: String,
+    ) -> Result<Epoch> {
+        self.validate()?;
+        self.transition_boundary()?;
+        Epoch::make(
+            &observation::publication(&self.record)?.bytes,
+            identity,
+            out,
+            self.record.inbox.source_anchor.clone(),
+            metadata_hash,
+        )
+    }
+    fn transition_boundary(&self) -> Result<()> {
+        let r = &self.record;
+        let i = &r.inbox;
+        let j = &r.journal;
+        if j.epoch.is_some()
+            || j.stage.is_some()
+            || i.reservation.is_some()
+            || !i.pending.is_empty()
+            || i.cursor != i.retired_to
+            || i.cursor != j.head.source_to_exclusive
+            || j.head.seal.is_none()
+        {
+            return Err("epoch requires drained committed boundary".into());
+        }
+        Ok(())
+    }
     pub fn propose(&self, action: Action) -> Result<Proposal> {
         self.validate()?;
         let mut r = self.record.clone();
@@ -485,6 +564,54 @@ impl<K: Kernel> Coordinator<K> {
         let mut progress = None;
         let mut unchanged = false;
         match action {
+            Action::Transition {
+                epoch,
+                state_hex,
+                event_hex,
+                score_hex,
+            } => {
+                let out = Output {
+                    state: unhex(&state_hex)?,
+                    events: unhex(&event_hex)?,
+                    scores: unhex(&score_hex)?,
+                };
+                epoch.validate()?;
+                epoch.output_matches(&out)?;
+                if let Some(existing) = &r.journal.epoch {
+                    if existing != epoch.as_ref() {
+                        return Err("only one epoch crossing per history".into());
+                    }
+                    unchanged = true;
+                } else {
+                    self.transition_boundary()?;
+                    if epoch.previous_publication_hex
+                        != hex(&observation::publication(&self.record)?.bytes)
+                        || epoch.source_cursor != r.inbox.cursor
+                        || epoch.source_anchor != r.inbox.source_anchor
+                    {
+                        return Err("epoch expected predecessor/source".into());
+                    }
+                    r.version = 6;
+                    r.journal.version = 3;
+                    r.journal.identity = epoch.new_identity.clone();
+                    r.journal.head = Head {
+                        segment_id: Some(epoch.segment_id.clone()),
+                        logical_end: epoch.logical_boundary.clone(),
+                        source_to_exclusive: epoch.source_cursor.clone(),
+                        manifest_hash: epoch.transition_hash.clone(),
+                        state_hash: epoch.state_hash.clone(),
+                        state_hex,
+                        seal: None,
+                        event_hex,
+                        score_hex,
+                    };
+                    r.inbox.last_ack = Some(epoch.transition_hash.clone());
+                    r.journal.epoch = Some(*epoch);
+                    inc(&mut r.journal.fence)?;
+                    inc(&mut r.journal.revision)?;
+                    inc(&mut r.inbox.revision)?;
+                }
+            }
             Action::Ingest {
                 start,
                 records,
@@ -543,6 +670,7 @@ impl<K: Kernel> Coordinator<K> {
                     schema_hash: j.identity.schema_hash.clone(),
                     previous_state: h.state_hash.clone(),
                     previous_manifest: h.manifest_hash.clone(),
+                    epoch_hash: j.epoch.as_ref().map(|e| e.transition_hash.clone()),
                     input_root: input_root(
                         &inputs,
                         number(&h.source_to_exclusive)?,

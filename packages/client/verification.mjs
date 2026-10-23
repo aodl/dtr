@@ -1,7 +1,8 @@
 /** Browser-compatible content verification; IC signature verification is an explicit dependency.
  * No root key is fetched from a replica. A missing certificate verifier is a hard failure.
  */
-import {decodeCanonical} from '../runtime/canonical.mjs';
+import {epochStructure,epochPayload,checkEpochHead} from '../protocol/epoch-codec.mjs';
+import {decodeCanonical,encodeCanonical} from '../runtime/canonical.mjs';
 import {encodeSeal} from '../protocol/seal-codec.mjs';
 import {ascii,concat,hex,unhex,uint} from '../protocol/bytes.mjs';
 const CHUNK=16384,MAX_BYTES=1048576,MAX_ENVELOPE=65536,KINDS=['state','events','scores'];
@@ -14,11 +15,11 @@ async function content(bytes,expectedRoot){
   bytes=Uint8Array.from(bytes); // Snapshot mutable transport memory before any await.
   digest(expectedRoot);if(await sha256Web(bytes)!==expectedRoot)throw new Error('publication root mismatch');
   const p=decodeCanonical(bytes);
-  if(![5,6].includes(p.version))throw new Error('publication version');
+  if(![5,6,7].includes(p.version))throw new Error('publication version');
   keys(p,p.version===5?['version','revision','identity','ingest_head','head','chunk_bytes','artifacts']
-    :['version','identity','head','chunk_bytes','artifacts','render_format']);
+    :[ 'version','identity','head','chunk_bytes','artifacts','render_format',...(p.version===7?['epoch']:[])]);
   if(p.chunk_bytes!==CHUNK||(p.version===5&&(!Number.isSafeInteger(p.revision)||p.revision<0)))throw new Error('publication version/revision');
-  if(p.version===6&&p.render_format!==null&&(typeof p.render_format!=='string'||!/^[-a-z0-9]{1,64}$/.test(p.render_format)))throw new Error('render format');
+  if(p.version>=6&&p.render_format!==null&&(typeof p.render_format!=='string'||!/^[-a-z0-9]{1,64}$/.test(p.render_format)))throw new Error('render format');
   keys(p.identity,['source_id','rules_hash','config_hash','schema_hash']);Object.values(p.identity).forEach(digest);
   keys(p.head,['segment_id','logical_end','source_to_exclusive','manifest_hash','state_hash','seal']);
   const h=p.head;
@@ -27,7 +28,7 @@ async function content(bytes,expectedRoot){
   uint(h.logical_end);uint(h.source_to_exclusive);
   if(p.version===5&&uint(p.ingest_head)<uint(h.source_to_exclusive))throw new Error('publication source bounds');
   digest(h.manifest_hash);digest(h.state_hash);
-  const kinds=p.version===6&&p.render_format!==null?[...KINDS,'render']:KINDS;
+  const kinds=p.version>=6&&p.render_format!==null?[...KINDS,'render']:KINDS;
   if(!Array.isArray(p.artifacts)||p.artifacts.length!==kinds.length)throw new Error('artifact catalog');
   for(let i=0;i<kinds.length;i++){
     const a=p.artifacts[i];keys(a,['kind','length','sha256','chunks']);digest(a.sha256);
@@ -36,11 +37,17 @@ async function content(bytes,expectedRoot){
     a.chunks.forEach(digest);
   }
   if(h.state_hash!==p.artifacts[0].sha256)throw new Error('publication state identity');
+  if(p.version===7){
+    const {bytes:previous}=epochStructure(p.epoch);
+    if(await sha256Web(epochPayload(p.epoch))!==p.epoch.transition_hash)throw new Error('epoch commitment');
+    await content(previous,await sha256Web(previous));
+    checkEpochHead(p.epoch,h,p.identity,p.artifacts.slice(0,3).map(a=>a.sha256));
+  }
   if(h.seal===null){
-    if(h.segment_id!==null||h.manifest_hash!=='00'.repeat(32)||p.artifacts[1].length!==0||p.artifacts[2].length!==0)throw new Error('publication genesis');
+    if(p.version!==7&&(h.segment_id!==null||h.manifest_hash!=='00'.repeat(32)||p.artifacts[1].length!==0||p.artifacts[2].length!==0))throw new Error('publication genesis');
   }else{
     const s=h.seal;
-    keys(s,['segment_id','logical_start','logical_end','source_from','source_to_exclusive','input_count','source_id','source_anchor','rules_hash','config_hash','schema_hash','previous_state','previous_manifest','input_root']);
+    keys(s,['segment_id','logical_start','logical_end','source_from','source_to_exclusive','input_count','source_id','source_anchor','rules_hash','config_hash','schema_hash','previous_state','previous_manifest','input_root',...(p.version===7?['epoch_hash']:[])]);
     if(['segment_id','logical_start','logical_end','source_from','source_to_exclusive'].some(k=>typeof s[k]!=='bigint')
       ||!Number.isSafeInteger(s.input_count))throw new Error('publication seal integer tags');
     for(const key of Object.keys(p.identity))if(s[key]!==p.identity[key])throw new Error('publication seal identity');
@@ -85,11 +92,17 @@ export async function verifyRetainedPredecessor(bytes,successor){
   if(!authentic.has(successor))throw new Error('verified successor required');
   if(!(bytes instanceof Uint8Array)||bytes.length>MAX_ENVELOPE)throw new Error('publication bounds');
   bytes=Uint8Array.from(bytes);const root=await sha256Web(bytes),p=await content(bytes,root),next=successor.publication;
-  if(p.version!==6||next.version!==6)throw new Error('retained publication identity');
+  if(![6,7].includes(p.version)||![6,7].includes(next.version))throw new Error('retained publication identity');
   // A successor seal authenticates only the predecessor's authoritative
   // manifest (state, events and scores). Optional render bytes require their
   // own directly authenticated catalog and cannot inherit predecessor trust.
   if(p.render_format!==null||next.render_format!==null)throw new Error('retained render requires direct authentication');
+  if(next.version===7&&next.head.seal===null){
+    if(p.version!==6||hex(bytes)!==next.epoch.previous_publication_hex)throw new Error('retained epoch predecessor');
+    const extra=successor.mode==='certificate-verifier'?{canister_id:successor.canister_id,network:successor.network,certificate_time_ns:successor.certificate_time_ns}:{};
+    return ticket(p,root,successor.mode,extra);
+  }
+  if(p.version!==next.version||(p.version===7&&p.epoch.transition_hash!==next.epoch.transition_hash))throw new Error('retained epoch mismatch');
   if(p.render_format!==next.render_format
     ||Object.keys(p.identity).some(k=>p.identity[k]!==next.identity[k]))throw new Error('retained publication identity');
   const a=p.head,b=next.head,s=b.seal;
@@ -123,47 +136,58 @@ export class ArtifactAssembler {
 }
 
 /** A client must not accept an older/same-height conflicting head just because a signature is valid. */
+function deployment(a,b){
+ if(a.mode!==b.mode||a.canister_id!==b.canister_id||a.network!==b.network)throw new Error('observation deployment/rules changed');
+}
+function crossing(a,b,resync){
+ if(a.version!==6||b.version!==7)throw new Error('observation deployment/rules changed');
+ const e=b.epoch,previous=epochStructure(e).previous;
+ if(Object.keys(a.identity).some(k=>a.identity[k]!==previous.identity[k])||a.render_format!==previous.render_format||b.render_format!==a.render_format)throw new Error('observation epoch identity');
+ const old=a.head.segment_id===null?-1n:a.head.segment_id,cut=previous.head.segment_id;
+ if(old>cut||a.head.logical_end>e.logical_boundary||a.head.source_to_exclusive>e.source_cursor)throw new Error('observation epoch rollback');
+ if(old===cut&&hex(encodeCanonical(a))!==e.previous_publication_hex)throw new Error('observation epoch predecessor mismatch');
+ if(!resync&&(old!==cut||b.head.segment_id!==e.segment_id))throw new Error('epoch snapshot resync required');
+}
+function sameEpoch(a,b){
+ if(b.version!==a.version||Object.keys(b.identity).some(k=>b.identity[k]!==a.identity[k]))return false;
+ if(a.version===7&&a.epoch.transition_hash!==b.epoch.transition_hash)throw new Error('observation epoch changed');
+ return true;
+}
 export class PublicationSequence {
-  constructor(){this.last=null;}
-  accept(verified){
-    if(!authentic.has(verified))throw new Error('verified publication required');
-    const p=verified.publication,prior=this.last?.publication;
-    if(prior){
-      if(verified.mode!==this.last.mode||verified.canister_id!==this.last.canister_id||verified.network!==this.last.network
-        ||Object.keys(p.identity).some(k=>p.identity[k]!==prior.identity[k]))throw new Error('observation deployment/rules changed');
-      if(p.version!==prior.version)throw new Error('observation version changed: explicit resync required');
-      if(p.version===5){
-        if(p.revision<prior.revision||p.ingest_head<prior.ingest_head)throw new Error('observation rollback');
-        if(p.revision===prior.revision&&verified.root_hash!==this.last.root_hash)throw new Error('same-revision conflicting observation');
-      } else if(p.render_format!==prior.render_format)throw new Error('render format changed: explicit resync required');
-      const a=prior.head,b=p.head;
-      if(a.segment_id===b.segment_id){
-        if(p.version===6&&verified.root_hash!==this.last.root_hash)throw new Error('same-height conflicting observation');
-        if(a.manifest_hash!==b.manifest_hash||a.state_hash!==b.state_hash||a.logical_end!==b.logical_end
-          ||a.source_to_exclusive!==b.source_to_exclusive)throw new Error('same-height conflicting observation');
-      }else{
-        const next=a.segment_id===null?0n:a.segment_id+1n;
-        if(b.segment_id===null||b.segment_id<next)throw new Error('observation rollback');
-        if(b.segment_id!==next)throw new Error('snapshot resync required');
-        if(b.seal.previous_manifest!==a.manifest_hash||b.seal.previous_state!==a.state_hash
-          ||b.seal.logical_start!==a.logical_end||b.seal.source_from!==a.source_to_exclusive)throw new Error('observation chain mismatch');
-      }
-    }
-    this.last=verified;return verified;
+ constructor(){this.last=null;}
+ accept(verified){
+  if(!authentic.has(verified))throw new Error('verified publication required');
+  const p=verified.publication,prior=this.last?.publication;
+  if(prior){
+   deployment(this.last,verified);
+   if(!sameEpoch(prior,p)){crossing(prior,p,false);this.last=verified;return verified;}
+   if(p.version===5){
+    if(p.revision<prior.revision||p.ingest_head<prior.ingest_head)throw new Error('observation rollback');
+    if(p.revision===prior.revision&&verified.root_hash!==this.last.root_hash)throw new Error('same-revision conflicting observation');
+   }else if(p.render_format!==prior.render_format)throw new Error('render format changed: explicit resync required');
+   const a=prior.head,b=p.head;
+   if(a.segment_id===b.segment_id){
+    if(p.version>=6&&verified.root_hash!==this.last.root_hash)throw new Error('same-height conflicting observation');
+    if(a.manifest_hash!==b.manifest_hash||a.state_hash!==b.state_hash||a.logical_end!==b.logical_end||a.source_to_exclusive!==b.source_to_exclusive)throw new Error('same-height conflicting observation');
+   }else{
+    const next=a.segment_id===null?0n:a.segment_id+1n;
+    if(b.segment_id===null||b.segment_id<next)throw new Error('observation rollback');
+    if(b.segment_id!==next)throw new Error('snapshot resync required');
+    if(!b.seal||b.seal.previous_manifest!==a.manifest_hash||b.seal.previous_state!==a.state_hash||b.seal.logical_start!==a.logical_end||b.seal.source_from!==a.source_to_exclusive)throw new Error('observation chain mismatch');
+   }
   }
-  /** Explicitly anchor at a newer authentic snapshot after retained history is
-   * unavailable. This preserves the in-session anti-rollback floor and never
-   * claims that omitted animation was observed. */
-  resync(verified){
-    if(!authentic.has(verified))throw new Error('verified publication required');
-    if(!this.last)return this.accept(verified);
-    const a=this.last.publication,b=verified.publication;
-    if(verified.mode!==this.last.mode||verified.canister_id!==this.last.canister_id||verified.network!==this.last.network
-      ||b.version!==a.version||b.render_format!==a.render_format
-      ||Object.keys(b.identity).some(k=>b.identity[k]!==a.identity[k]))throw new Error('observation deployment/rules changed');
-    const old=a.head.segment_id===null?-1n:a.head.segment_id,next=b.head.segment_id===null?-1n:b.head.segment_id;
-    if(next<=old||b.head.logical_end<a.head.logical_end||b.head.source_to_exclusive<a.head.source_to_exclusive)
-      throw new Error('observation rollback');
-    this.last=verified;return verified;
-  }
+  this.last=verified;return verified;
+ }
+ /** Explicit snapshot anchor retains the session floor, including across epochs. */
+ resync(verified){
+  if(!authentic.has(verified))throw new Error('verified publication required');
+  if(!this.last)return this.accept(verified);
+  deployment(this.last,verified);
+  const a=this.last.publication,b=verified.publication;
+  if(!sameEpoch(a,b))crossing(a,b,true);
+  else if(b.render_format!==a.render_format)throw new Error('observation deployment/rules changed');
+  const old=a.head.segment_id===null?-1n:a.head.segment_id,next=b.head.segment_id===null?-1n:b.head.segment_id;
+  if(next<=old||b.head.logical_end<a.head.logical_end||b.head.source_to_exclusive<a.head.source_to_exclusive)throw new Error('observation rollback');
+  this.last=verified;return verified;
+ }
 }

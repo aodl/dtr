@@ -234,3 +234,194 @@ fn invalid_sparse_admission_is_atomic() {
     assert!(h.apply(ordered(4096, 4097, &[4096])).is_err());
     assert_eq!(h.snapshot().unwrap(), full);
 }
+
+fn committed() -> Coordinator<Toy> {
+    let mut h = fresh();
+    fill(&mut h);
+    finish(&mut h, None);
+    h
+}
+fn finish(h: &mut Coordinator<Toy>, end: Option<u64>) {
+    if let Some(end) = end {
+        h.apply(Action::Seal {
+            logical_end: Int(end.into()),
+        })
+        .unwrap();
+    }
+    h.apply(Action::Step { budget: 3 }).unwrap();
+    h.apply(Action::Publish {
+        manifest_hash: h
+            .record
+            .journal
+            .stage
+            .as_ref()
+            .unwrap()
+            .ready_hash
+            .clone()
+            .unwrap(),
+    })
+    .unwrap();
+}
+fn next_identity() -> Identity {
+    Identity {
+        rules_hash: "05".repeat(32),
+        schema_hash: "06".repeat(32),
+        ..fresh().record.journal.identity
+    }
+}
+fn output() -> Output {
+    Output {
+        state: vec![4],
+        events: vec![7],
+        scores: vec![9],
+    }
+}
+fn transition(e: &dtr_host::epoch::Epoch) -> Action {
+    Action::Transition {
+        epoch: Box::new(e.clone()),
+        state_hex: "04".into(),
+        event_hex: "07".into(),
+        score_hex: "09".into(),
+    }
+}
+#[test]
+fn epoch_shared_public_bytes() {
+    use dtr_host::observation::publication;
+    use dtr_wire::hex;
+    let mut h = committed();
+    let previous = publication(&h.record).unwrap();
+    let e = h
+        .prepare_transition(next_identity(), &output(), "cd".repeat(32))
+        .unwrap();
+    h.apply(transition(&e)).unwrap();
+    let checkpoint = publication(&h.record).unwrap();
+    load(&mut h);
+    finish(&mut h, Some(2));
+    let successor = publication(&h.record).unwrap();
+    let actual = serde_json::json!({
+        "previous_publication_hex": hex(&previous.bytes),
+        "epoch_hex": hex(&encode(&e).unwrap()),
+        "checkpoint_publication_hex": hex(&checkpoint.bytes),
+        "successor_seal_hex": hex(&h.record.journal.head.seal.as_ref().unwrap().bytes().unwrap()),
+        "successor_publication_hex": hex(&successor.bytes),
+    });
+    // Explicit generator mode writes only a caller-selected review artifact, never a golden.
+    if let Ok(path) = std::env::var("DTR_EPOCH_REVIEW_VECTOR") {
+        std::fs::write(path, serde_json::to_vec_pretty(&actual).unwrap()).unwrap();
+    } else {
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/epoch-v1.json")).unwrap();
+        assert_eq!(actual, expected);
+    }
+    assert_eq!(
+        previous.bytes,
+        dtr_wire::unhex(actual["previous_publication_hex"].as_str().unwrap()).unwrap()
+    );
+    assert_eq!(
+        h.record
+            .journal
+            .head
+            .seal
+            .as_ref()
+            .unwrap()
+            .bytes()
+            .unwrap()
+            .len(),
+        340
+    );
+    assert_eq!(
+        e.validate()
+            .unwrap()
+            .head
+            .seal
+            .unwrap()
+            .bytes()
+            .unwrap()
+            .len(),
+        308
+    );
+}
+#[test]
+fn epoch_boundary_validation_and_atomic_retry_recovery() {
+    let mut h = fresh();
+    assert!(h
+        .prepare_transition(next_identity(), &output(), "cd".repeat(32))
+        .is_err());
+    fill(&mut h);
+    assert!(h
+        .prepare_transition(next_identity(), &output(), "cd".repeat(32))
+        .is_err());
+    finish(&mut h, None);
+    let e = h
+        .prepare_transition(next_identity(), &output(), "cd".repeat(32))
+        .unwrap();
+    let old = h.snapshot().unwrap();
+    let p = h.propose(transition(&e)).unwrap();
+    assert_eq!(h.snapshot().unwrap(), old); // Interrupted before outer-root persistence.
+    load(&mut h);
+    h.apply(transition(&e)).unwrap();
+    assert!(h.commit(p).is_err()); // A stale proposal cannot overwrite the committed transition.
+    load(&mut h); // Lost acknowledgement after root persistence.
+    let checkpoint = h.snapshot().unwrap();
+    h.apply(transition(&e)).unwrap();
+    assert_eq!(h.snapshot().unwrap(), checkpoint);
+    finish(&mut h, Some(2));
+    load(&mut h);
+    let later = h.snapshot().unwrap();
+    h.apply(transition(&e)).unwrap();
+    assert_eq!(h.snapshot().unwrap(), later);
+    assert!(h
+        .prepare_transition(next_identity(), &output(), "cd".repeat(32))
+        .is_err());
+    for empty in [false, true] {
+        let mut h = committed();
+        h.apply(ordered(2, 10, if empty { &[] } else { &[3] }))
+            .unwrap();
+        let saved = h.snapshot().unwrap();
+        assert!(h
+            .prepare_transition(next_identity(), &output(), "cd".repeat(32))
+            .is_err());
+        assert!(h.apply(transition(&e)).is_err());
+        assert_eq!(h.snapshot().unwrap(), saved);
+    }
+}
+#[test]
+fn epoch_corruption_and_wrong_predecessor_are_rejected_atomically() {
+    let mut h = committed();
+    let e = h
+        .prepare_transition(next_identity(), &output(), "cd".repeat(32))
+        .unwrap();
+    let saved = h.snapshot().unwrap();
+    for n in 0..6 {
+        let mut wrong = e.clone();
+        match n {
+            0 => wrong.metadata_hash = "ee".repeat(32),
+            1 => wrong.source_cursor = Int::from(3),
+            2 => wrong.source_anchor = "00".repeat(32),
+            3 => wrong.state_hash = "ff".repeat(32),
+            4 => wrong.previous_publication_hex = "00".into(),
+            _ => wrong.new_identity.source_id = "ff".repeat(32),
+        }
+        if n != 0 {
+            wrong.transition_hash = wrong.commitment().unwrap();
+        }
+        assert!(h.apply(transition(&wrong)).is_err());
+        assert_eq!(h.snapshot().unwrap(), saved);
+    }
+    let mut other = committed();
+    finish(&mut other, Some(2));
+    let wrong = other
+        .prepare_transition(next_identity(), &output(), "cd".repeat(32))
+        .unwrap();
+    assert!(h.apply(transition(&wrong)).is_err());
+    h.apply(transition(&e)).unwrap();
+    finish(&mut h, Some(2));
+    h.record
+        .journal
+        .epoch
+        .as_mut()
+        .unwrap()
+        .previous_publication_hex = "00".into();
+    let damaged = h.snapshot().unwrap();
+    assert!(Coordinator::restore(&damaged, &hash(&damaged), Toy).is_err());
+}

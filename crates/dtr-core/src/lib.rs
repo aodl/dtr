@@ -42,6 +42,7 @@ pub struct Seal {
     pub previous_state: Hash32,
     pub previous_manifest: Hash32,
     pub input_root: Hash32,
+    pub epoch_hash: Option<Hash32>,
 }
 impl Seal {
     pub fn validate(&self) -> Result<(), CoreError> {
@@ -61,7 +62,11 @@ impl Seal {
     }
     pub fn encode(&self) -> Result<Vec<u8>, CoreError> {
         self.validate()?;
-        let mut out = b"DTRSEAL1".to_vec();
+        let mut out = if self.epoch_hash.is_some() {
+            b"DTRSEAL2".to_vec()
+        } else {
+            b"DTRSEAL1".to_vec()
+        };
         for n in [
             self.segment_id,
             self.logical_start,
@@ -84,6 +89,9 @@ impl Seal {
         ] {
             out.extend(h);
         }
+        if let Some(epoch) = self.epoch_hash {
+            out.extend(epoch);
+        }
         Ok(out)
     }
     /// Hash-link validation needs the committed manifest/state supplied separately by the host.
@@ -103,7 +111,7 @@ impl Seal {
         {
             return Err(CoreError::WrongSuccessor);
         }
-        if self.source_id != prior.source_id {
+        if self.source_id != prior.source_id || self.epoch_hash != prior.epoch_hash {
             return Err(CoreError::IdentityChanged);
         }
         Ok(())
@@ -165,6 +173,7 @@ mod tests {
             previous_state: [6; 32],
             previous_manifest: [7; 32],
             input_root: [8; 32],
+            epoch_hash: None,
         }
     }
     #[test]
