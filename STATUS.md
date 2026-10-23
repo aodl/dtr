@@ -1,3 +1,21 @@
+# Multi-epoch extension — local, not published
+
+Branch `checkpoint/dtr-multi-epoch` starts at published v0.13.0 revision
+`c12af747190f7e24d5e68cdf57dbb1494095a46b`. Package 0.14.0 adds the generic,
+bounded v8 proof for a second and subsequent authenticated epoch. Original v6
+publications, the v7 epoch fixture and both seal encodings remain byte-identical.
+No remote Git or package publication has occurred. B2Z must not pin this work
+until the user publishes its immutable commit.
+
+Local verification: 200 JavaScript tests and 35 Rust tests pass; locked/offline
+Cargo, formatting, strict Clippy and package inventory also pass. The frozen
+`@dtr/timeline-runtime@0.14.0` tarball has SHA-256
+`ea5e8f471ab15cadb09367c6391b74054918665f797381c776b630c5082938dc`.
+Consumer verification against a published immutable revision remains pending.
+The older status sections below are preserved as historical evidence.
+
+---
+
 # Authenticated epoch candidate — local, not published
 
 Branch `checkpoint/authenticated-epoch-transition` descends from local master

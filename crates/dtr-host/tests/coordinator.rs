@@ -329,17 +329,7 @@ fn epoch_shared_public_bytes() {
             .len(),
         340
     );
-    assert_eq!(
-        e.validate()
-            .unwrap()
-            .head
-            .seal
-            .unwrap()
-            .bytes()
-            .unwrap()
-            .len(),
-        308
-    );
+    assert_eq!(previous.data.head.seal.unwrap().bytes().unwrap().len(), 308);
 }
 #[test]
 fn epoch_boundary_validation_and_atomic_retry_recovery() {
