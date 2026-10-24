@@ -542,8 +542,7 @@ impl<K: Kernel> Coordinator<K> {
         let r = &self.record;
         let i = &r.inbox;
         let j = &r.journal;
-        if j.epoch.is_some()
-            || j.stage.is_some()
+        if j.stage.is_some()
             || i.reservation.is_some()
             || !i.pending.is_empty()
             || i.cursor != i.retired_to
@@ -577,16 +576,14 @@ impl<K: Kernel> Coordinator<K> {
                 };
                 epoch.validate()?;
                 epoch.output_matches(&out)?;
-                if let Some(existing) = &r.journal.epoch {
-                    if existing != epoch.as_ref() {
-                        return Err("only one epoch crossing per history".into());
-                    }
+                let retry = r.journal.epoch.as_ref() == Some(epoch.as_ref());
+                if retry {
                     unchanged = true;
                 } else {
                     self.transition_boundary()?;
-                    if epoch.previous_publication_hex
-                        != hex(&observation::publication(&self.record)?.bytes)
-                        || epoch.source_cursor != r.inbox.cursor
+                    let previous = observation::publication(&self.record)?.bytes;
+                    epoch.expected_predecessor(&previous)?;
+                    if epoch.source_cursor != r.inbox.cursor
                         || epoch.source_anchor != r.inbox.source_anchor
                     {
                         return Err("epoch expected predecessor/source".into());

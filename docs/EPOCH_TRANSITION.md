@@ -1,4 +1,4 @@
-# One authenticated epoch checkpoint
+# Authenticated epoch checkpoints
 
 The trusted host calls Rust `Coordinator::prepare_transition(identity, output,
 metadata_hash)` / JS `prepareTransition(identity, output, metadataHash)`, reviews
@@ -42,6 +42,21 @@ Legacy records remain v5/journal v2, publications remain v6, and seals remain
 `DTRSEAL1` with no optional field serialized. Historical v5 publication adapters
 cannot encode an epoch. Existing historical bytes are not upgraded in place.
 
+Epoch v2 is used only after an existing v1 or v2 epoch. Its publication v8 proof
+keeps the same boundary, output and metadata commitments but replaces the embedded
+catalog with:
+
+- the SHA-256 and bounded head/identity summary of the exact predecessor
+  publication;
+- the predecessor epoch hash and monotonically increasing transition index; and
+- a constant-size chain hash derived from all preceding transition hashes.
+
+The v2 transition commitment uses the `DTREPOCH2` domain. The chain accumulator
+uses `DTREPOCHCHAIN1`. A v2 object keeps `previous_publication_hex` as the empty
+string and cannot recursively embed another catalog. Its size therefore remains
+bounded as transition count grows. Publication v8 carries epoch v2; its ordinary
+successor seals remain DTRSEAL2 and bind the current transition hash.
+
 ## Atomicity and verification
 
 Proposals are immutable and revision-fenced. The consumer must persist the whole
@@ -51,21 +66,22 @@ identical transition and output is a no-op, even after further segments. A
 conflicting request fails. Restore checks both the current epoch and its embedded
 predecessor manifest commitment. Kernel validation remains application-owned.
 
-A certified-data root covers the complete publication v7. Client verification
-checks the epoch commitment, old v6 manifest, new identity and seal binding before
-issuing a verified ticket. Retained predecessor verification crosses the exact
-embedded old publication, then resumes consecutive seals. A client behind the
-cutover uses explicit snapshot resync; its identity, time, source and ordinal
-anti-rollback floor must fit the authenticated predecessor boundary. A v7 session
-cannot roll back to v6 or silently replace the epoch. Fresh startup authenticates
+A certified-data root covers the complete current publication. Client verification
+checks the epoch commitment, predecessor summary, new identity and seal binding
+before issuing a verified ticket. Retained predecessor verification crosses the
+exact embedded v6 publication or exact v8 predecessor hash, then resumes
+consecutive seals. A client behind the cutover uses explicit snapshot resync; its
+identity, time, source and ordinal anti-rollback floor must fit the authenticated
+predecessor boundary. A session cannot roll back across v6/v7/v8 or silently
+replace an epoch. Fresh startup authenticates
 the current epoch proof even when old artifacts have been evicted. Artifact
 retention remains bounded and does not become an archival availability promise.
 
-This version deliberately supports **one v6 → v7 crossing per history**, not
-recursive epochs, registries, scripts or governance. A second crossing is rejected.
-The 16 KiB predecessor limit bounds certification and restore work; a host whose
-catalog exceeds that limit must report incompatibility rather than discard fields.
-No topology, payments, economics or canister logic is included in DTR.
+The 16 KiB predecessor limit still bounds the original v1 crossing. Later
+crossings use the fixed summary and exact publication hash; when predecessor
+bytes are retained, clients verify that direct link before continuing. No
+recursive registry, migration script, topology, payments, economics or canister
+logic is included in DTR.
 
 ## Evidence
 
@@ -73,6 +89,7 @@ No topology, payments, economics or canister logic is included in DTR.
 implementations check the exact predecessor, epoch, checkpoint, successor seal and
 successor publication bytes. Rust and JS toy-kernel tests cover drained boundaries,
 corruption, source mismatch, atomic retry/recovery and post-transition seals.
-Independent competitive-Life tests exercise the same operation. Client tests cover
-retained predecessors, eviction, fresh startup, explicit resync and rollback.
+Independent competitive-Life tests exercise first and later transitions. Client
+tests cover v7/v8 retained predecessors, eviction, fresh startup, explicit resync
+and rollback.
 Existing v6-only and historical encoding tests remain enabled.

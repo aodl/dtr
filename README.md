@@ -1,6 +1,6 @@
 # Deterministic Timeline Runtime
 
-DTR is the reusable infrastructure extracted from the tested BTZ S10 implementation. It provides canonical deterministic encodings, checkpoint seals, a bounded atomic coordinator, resumable-kernel interfaces, source fencing models, publication-v6/v7 construction and verification, retained-publication chaining, anti-rollback sequencing and adaptive playout buffering.
+DTR is the reusable infrastructure extracted from the tested BTZ S10 implementation. It provides canonical deterministic encodings, checkpoint seals, a bounded atomic coordinator, resumable-kernel interfaces, source fencing models, publication-v6/v7/v8 construction and verification, retained-publication chaining, anti-rollback sequencing and adaptive playout buffering.
 
 DTR deliberately does not contain BTZ mechanics, payments, pricing, animation projection, rendering, ledger classification or a concrete canister application. `examples/competitive-life` is the small second-kernel boundary test.
 
@@ -37,6 +37,10 @@ canister_id,host})` share the existing certificate/observation implementation.
 trusted deployment input, never query-string or server-selected policy.
 Compatibility local wrappers remain. Neither path fetches a root key.
 
-## Authenticated epoch checkpoint (0.13.0 candidate)
+## Authenticated epoch checkpoints
 
-See [the epoch wire and host contract](docs/EPOCH_TRANSITION.md). One explicit, drained v6 → v7 boundary can change application identity and state without rewriting historical seals or publications. This candidate requires consumer and installed-IC verification before deployment.
+See [the epoch wire and host contract](docs/EPOCH_TRANSITION.md). The original
+v6 → v7 boundary remains byte-identical. Package 0.14 adds bounded publication
+v8 proofs for second and subsequent drained identity/state transitions without
+recursively embedding prior catalogs. Consumer and installed-IC verification is
+required before deployment.

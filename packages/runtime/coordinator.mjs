@@ -2,7 +2,7 @@
  * Trusted host API: ingestPrefix is NOT a ledger verifier or a public user method.
  * The backing store must atomically commit the whole replacement, or retain the old one.
  */
-import {makeEpoch,validateEpoch,epochOutput} from './epoch.mjs';
+import {makeEpoch,validateEpoch,validateEpochPredecessor,epochOutput} from './epoch.mjs';
 import {publication} from '../observation/publication.mjs';
 import {AtomicJournalStore, SegmentJournal} from './journal.mjs';
 import {VerifiedInbox} from '../source/inbox.mjs';
@@ -109,7 +109,7 @@ export class TimelineCoordinator {
     return makeEpoch(publication(r).bytes,identity,out,r.inbox.source_anchor,metadataHash);
   }
   #transitionBoundary(r){const j=r.journal,i=r.inbox;
-    if(j.epoch||j.stage||i.reservation||i.pending.length||i.cursor!==i.retired_to||i.cursor!==j.head.source_to_exclusive||!j.head.seal)throw new Error('epoch requires drained committed boundary');
+    if(j.stage||i.reservation||i.pending.length||i.cursor!==i.retired_to||i.cursor!==j.head.source_to_exclusive||!j.head.seal)throw new Error('epoch requires drained committed boundary');
   }
   /** Trusted synchronous orchestration; one outer fence, no nested store transactions. */
   propose(action) {
@@ -123,9 +123,10 @@ export class TimelineCoordinator {
       case 'transition': {
         const e=structuredClone(action.epoch),out={state:unhex(action.state_hex),events:unhex(action.event_hex),scores:unhex(action.score_hex)};
         validateEpoch(e);epochOutput(e,out);
-        if(j.epoch){if(!same(j.epoch,e))throw new Error('only one epoch crossing per history');unchanged=true;break;}
+        if(j.epoch&&same(j.epoch,e)){unchanged=true;break;}
         this.#transitionBoundary(r);
-        if(e.previous_publication_hex!==hex(publication(r).bytes)||e.source_cursor!==i.cursor||e.source_anchor!==i.source_anchor)throw new Error('epoch expected predecessor/source');
+        validateEpochPredecessor(e,publication(r).bytes);
+        if(e.source_cursor!==i.cursor||e.source_anchor!==i.source_anchor)throw new Error('epoch expected predecessor/source');
         r.version=6;j.version=3;j.identity=structuredClone(e.new_identity);j.epoch=e;
         j.head={segment_id:e.segment_id,logical_end:e.logical_boundary,source_to_exclusive:e.source_cursor,
           manifest_hash:e.transition_hash,state_hash:e.state_hash,state_hex:action.state_hex,seal:null,event_hex:action.event_hex,score_hex:action.score_hex};

@@ -50,7 +50,8 @@ test('transition is atomic before/after persistence, idempotent after restore an
   const saved=h.snapshot();h.apply(action(e));assert.deepEqual(h.snapshot(),saved);
   finish(h,2n);h=TimelineCoordinator.restore(h.snapshot(),sha256(h.snapshot()),toy);
   const later=h.snapshot();h.apply(action(e));assert.deepEqual(h.snapshot(),later);
-  assert.throws(()=>h.prepareTransition({...next,config_hash:'ff'.repeat(32)},out,'cd'.repeat(32)),/boundary/);
+  const second=h.prepareTransition({...next,config_hash:'ff'.repeat(32)},out,'cd'.repeat(32));
+  assert.equal(second.version,2);assert.equal(second.transition_index,2n);assert.equal(second.previous_publication_hex,'');
  }
 });
 
@@ -109,6 +110,37 @@ test('independent Life kernel runs unchanged before and after an application-sup
  assert.deepEqual(unhex(h.committed().state_hex),before);finish(h,2n);
  assert.equal(h.committed().seal.epoch_hash,e.transition_hash);
  TimelineCoordinator.restore(h.snapshot(),sha256(h.snapshot()),LifeInputKernel);
+});
+
+test('second and subsequent generic epochs are bounded, replayable and client-verifiable',async()=>{
+ const h=TimelineCoordinator.create(encodeBoard(board(4,4,Array(16).fill(0))),identity,{logical_start:0n,source_from:0n},LifeInputKernel);
+ finish(h,1n);let state=unhex(h.committed().state_hex),o={state,events:new Uint8Array(),scores:new Uint8Array()};
+ const first=h.prepareTransition(next,o,'a1'.repeat(32));h.apply({kind:'transition',epoch:first,state_hex:hex(state),event_hex:'',score_hex:''});finish(h,2n);
+ const beforeSecond=publication(h.publicationRecord()),secondIdentity={...next,config_hash:'07'.repeat(32)};
+ state=unhex(h.committed().state_hex);o={state,events:new Uint8Array(),scores:new Uint8Array()};
+ const second=h.prepareTransition(secondIdentity,o,'a2'.repeat(32));
+ assert.equal(second.version,2);assert.equal(second.transition_index,2n);assert.equal(second.previous_publication_hex,'');
+ assert.equal(second.predecessor.publication_hash,beforeSecond.sha256);
+ const secondAction={kind:'transition',epoch:second,state_hex:hex(state),event_hex:'',score_hex:''},savedBefore=h.snapshot();
+ assert.throws(()=>h.apply(secondAction,'before'),/commit/);assert.deepEqual(h.snapshot(),savedBefore);
+ for(const mutate of [e=>e.predecessor.publication_hash='ff'.repeat(32),e=>e.previous_chain_hash='ff'.repeat(32),e=>e.transition_index=3n]){
+  const wrong=structuredClone(secondAction);mutate(wrong.epoch);rehash(wrong.epoch);assert.throws(()=>h.apply(wrong),/predecessor|index/);assert.deepEqual(h.snapshot(),savedBefore);
+ }
+ h.apply(secondAction);
+ const secondCheckpoint=publication(h.publicationRecord());assert.equal(secondCheckpoint.data.version,8);
+ const sequence=new PublicationSequence(),beforeTicket=await ticket(beforeSecond),secondTicket=await ticket(secondCheckpoint);
+ sequence.accept(beforeTicket);sequence.accept(secondTicket);
+ assert.equal((await verifyRetainedPredecessor(beforeSecond.bytes,secondTicket)).root_hash,beforeSecond.sha256);
+ const fresh=new PublicationSequence();fresh.accept(await ticket(secondCheckpoint));
+ finish(h,3n);const beforeThird=publication(h.publicationRecord());sequence.accept(await ticket(beforeThird));
+ const thirdIdentity={...secondIdentity,schema_hash:'08'.repeat(32)};state=unhex(h.committed().state_hex);o={state,events:new Uint8Array(),scores:new Uint8Array()};
+ const third=h.prepareTransition(thirdIdentity,o,'a3'.repeat(32));
+ assert.equal(third.version,2);assert.equal(third.transition_index,3n);
+ assert.ok(Math.abs(encodeCanonical(third).length-encodeCanonical(second).length)<512,'epoch proof must not recursively grow');
+ h.apply({kind:'transition',epoch:third,state_hex:hex(state),event_hex:'',score_hex:''});
+ const thirdCheckpoint=publication(h.publicationRecord()),thirdTicket=await ticket(thirdCheckpoint);
+ sequence.accept(thirdTicket);await verifyRetainedPredecessor(beforeThird.bytes,thirdTicket);
+ const saved=h.snapshot();h.apply({kind:'transition',epoch:third,state_hex:hex(state),event_hex:'',score_hex:''});assert.deepEqual(h.snapshot(),saved);
 });
 
 

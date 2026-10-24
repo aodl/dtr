@@ -54,11 +54,11 @@ dependencies = [
 
 [[package]]
 name = "dtr-core"
-version = "0.13.0"
+version = "0.14.0"
 
 [[package]]
 name = "dtr-host"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "dtr-core",
  "dtr-wire",
@@ -70,11 +70,11 @@ dependencies = [
 
 [[package]]
 name = "dtr-source-model"
-version = "0.13.0"
+version = "0.14.0"
 
 [[package]]
 name = "dtr-wire"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "num-bigint",
  "num-rational",
@@ -108,7 +108,7 @@ checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "life-conformance"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "dtr-core",
 ]

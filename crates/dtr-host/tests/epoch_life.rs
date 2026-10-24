@@ -118,7 +118,7 @@ fn life_generation_and_cell_owners_survive_epoch_and_restart() {
         ..identity
     };
     let epoch = h
-        .prepare_transition(next, &output, "aa".repeat(32))
+        .prepare_transition(next.clone(), &output, "aa".repeat(32))
         .unwrap();
     h.apply(Action::Transition {
         epoch: Box::new(epoch.clone()),
@@ -152,4 +152,55 @@ fn life_generation_and_cell_owners_survive_epoch_and_restart() {
         2
     );
     assert_eq!(epoch.previous_publication_hex, hex(&old.bytes));
+    let before_second = dtr_host::observation::publication(&h.record).unwrap();
+    let second_output = Output {
+        state: unhex(&h.record.journal.head.state_hex).unwrap(),
+        events: vec![],
+        scores: vec![],
+    };
+    let second_identity = Identity {
+        rules_hash: "ee".repeat(32),
+        ..next
+    };
+    let second = h
+        .prepare_transition(second_identity, &second_output, "bb".repeat(32))
+        .unwrap();
+    assert_eq!(second.version, 2);
+    assert_eq!(second.index().unwrap(), 2);
+    assert!(second.previous_publication_hex.is_empty());
+    assert_eq!(
+        second.predecessor.as_ref().unwrap().publication_hash,
+        before_second.sha256
+    );
+    h.apply(Action::Transition {
+        epoch: Box::new(second.clone()),
+        state_hex: hex(&second_output.state),
+        event_hex: String::new(),
+        score_hex: String::new(),
+    })
+    .unwrap();
+    let checkpoint = dtr_host::observation::publication(&h.record).unwrap();
+    assert_eq!(checkpoint.data.version, 8);
+    assert!(checkpoint.bytes.len() < dtr_host::observation::MAX_PUBLICATION);
+    let saved = h.snapshot().unwrap();
+    h.apply(Action::Transition {
+        epoch: Box::new(second.clone()),
+        state_hex: hex(&second_output.state),
+        event_hex: String::new(),
+        score_hex: String::new(),
+    })
+    .unwrap();
+    assert_eq!(h.snapshot().unwrap(), saved);
+    finish(&mut h, 3);
+    assert_eq!(
+        h.record
+            .journal
+            .head
+            .seal
+            .as_ref()
+            .unwrap()
+            .epoch_hash
+            .as_ref(),
+        Some(&second.transition_hash)
+    );
 }

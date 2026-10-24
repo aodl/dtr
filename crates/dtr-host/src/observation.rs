@@ -101,7 +101,12 @@ pub fn publication(r: &Record) -> Result<Published> {
         .map(|(k, b)| describe(k, b))
         .collect::<Result<Vec<_>>>()?;
     let data = Publication {
-        version: if r.journal.epoch.is_some() { 7 } else { 6 },
+        version: match r.journal.epoch.as_ref().map(|e| e.version) {
+            None => 6,
+            Some(1) => 7,
+            Some(2) => 8,
+            Some(_) => return Err("observation epoch version".into()),
+        },
         identity: r.journal.identity.clone(),
         render_format: None,
         head: PublicHead::from(h),
