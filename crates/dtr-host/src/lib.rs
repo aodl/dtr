@@ -4,6 +4,7 @@
 use dtr_wire::{decode, encode, hash, hex, unhex, Int, Result};
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 pub mod epoch;
 use epoch::Epoch;
 
@@ -170,7 +171,7 @@ pub fn manifest(seal: &Seal, out: &Output) -> Result<Manifest> {
         manifest_hash: hash(&b),
     })
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Head {
     pub segment_id: Option<Int>,
@@ -288,9 +289,13 @@ pub struct Proposal {
     pub progress: Option<Progress>,
     pub unchanged: bool,
 }
+type HeadProof = (Head, Identity, Option<Epoch>, Option<String>);
 pub struct Coordinator<K: Kernel> {
     pub record: Record,
     kernel: K,
+    // Exact immutable committed-head identity, scoped to this coordinator only.
+    // Public record mutation is allowed; equality checks every dependent field.
+    checked_head: RefCell<Option<HeadProof>>,
 }
 
 /// One validation/transition for dense and ordered admission. A zero-width range
@@ -402,6 +407,7 @@ impl<K: Kernel> Coordinator<K> {
                 inbox,
             },
             kernel,
+            checked_head: RefCell::new(None),
         };
         c.validate()?;
         Ok(c)
@@ -413,6 +419,7 @@ impl<K: Kernel> Coordinator<K> {
         let c = Self {
             record: decode(bytes)?,
             kernel,
+            checked_head: RefCell::new(None),
         };
         c.validate()?;
         if encode(&c.record)? != bytes {
@@ -459,6 +466,49 @@ impl<K: Kernel> Coordinator<K> {
             return Err("coordinator source/head divergence".into());
         }
         input_root(&i.pending, number(&i.retired_to)?, number(&i.cursor)?)?;
+        self.validate_committed_head(j, i)?;
+        match (&j.stage, &i.reservation) {
+            (None, None) => {}
+            (Some(stage), Some(res)) => {
+                validate_seal(j, &stage.seal, &stage.inputs)?;
+                if stage.fence != j.fence
+                    || !matches!(stage.phase.as_str(), "running" | "ready")
+                    || stage.seal != res.seal
+                    || hash(&res.seal.bytes()?) != res.seal_hash
+                    || selected(i, number(&stage.seal.source_to_exclusive)?)? != stage.inputs
+                {
+                    return Err("reserved stage divergence".into());
+                }
+                let b = unhex(&stage.cursor_hex)?;
+                self.kernel.validate_cursor(&b, &stage.cursor_hash)?;
+                if stage.phase == "ready"
+                    && stage.ready_hash.as_ref()
+                        != Some(&manifest(&stage.seal, &self.kernel.result(&b)?)?.manifest_hash)
+                {
+                    return Err("ready output mismatch".into());
+                }
+            }
+            _ => return Err("coordinator reservation divergence".into()),
+        }
+        if encode(r)?.len() > MAX_IMAGE {
+            return Err("coordinator byte capacity".into());
+        }
+        Ok(())
+    }
+    fn validate_committed_head(&self, j: &Journal, i: &Inbox) -> Result<()> {
+        let h = &j.head;
+        if self
+            .checked_head
+            .borrow()
+            .as_ref()
+            .is_some_and(|(head, identity, epoch, ack)| {
+                head == h && identity == &j.identity && epoch == &j.epoch && ack == &i.last_ack
+            })
+        {
+            return Ok(());
+        }
+        // A changed or corrupt key never inherits trusted status.
+        *self.checked_head.borrow_mut() = None;
         if hash(&unhex(&h.state_hex)?) != h.state_hash {
             return Err("committed state mismatch".into());
         }
@@ -492,31 +542,18 @@ impl<K: Kernel> Coordinator<K> {
         } else if h.segment_id.is_some() || h.manifest_hash != ZERO || i.last_ack.is_some() {
             return Err("genesis head".into());
         }
-        match (&j.stage, &i.reservation) {
-            (None, None) => {}
-            (Some(stage), Some(res)) => {
-                validate_seal(j, &stage.seal, &stage.inputs)?;
-                if stage.fence != j.fence
-                    || !matches!(stage.phase.as_str(), "running" | "ready")
-                    || stage.seal != res.seal
-                    || hash(&res.seal.bytes()?) != res.seal_hash
-                    || selected(i, number(&stage.seal.source_to_exclusive)?)? != stage.inputs
-                {
-                    return Err("reserved stage divergence".into());
-                }
-                let b = unhex(&stage.cursor_hex)?;
-                self.kernel.validate_cursor(&b, &stage.cursor_hash)?;
-                if stage.phase == "ready"
-                    && stage.ready_hash.as_ref()
-                        != Some(&manifest(&stage.seal, &self.kernel.result(&b)?)?.manifest_hash)
-                {
-                    return Err("ready output mismatch".into());
-                }
-            }
-            _ => return Err("coordinator reservation divergence".into()),
-        }
-        if encode(r)?.len() > MAX_IMAGE {
-            return Err("coordinator byte capacity".into());
+
+        // Size checking cannot introduce a new Result/error path. The full record
+        // still undergoes its original structural/capacity checks below.
+        if encode(&(h, &j.identity, &j.epoch, &i.last_ack))
+            .is_ok_and(|bytes| bytes.len() <= 256 * 1024)
+        {
+            *self.checked_head.borrow_mut() = Some((
+                h.clone(),
+                j.identity.clone(),
+                j.epoch.clone(),
+                i.last_ack.clone(),
+            ));
         }
         Ok(())
     }

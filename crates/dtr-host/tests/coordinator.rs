@@ -415,3 +415,52 @@ fn epoch_corruption_and_wrong_predecessor_are_rejected_atomically() {
     let damaged = h.snapshot().unwrap();
     assert!(Coordinator::restore(&damaged, &hash(&damaged), Toy).is_err());
 }
+
+#[test]
+fn committed_head_memo_never_trusts_mutated_public_records() {
+    let mut h = fresh();
+    fill(&mut h);
+    h.apply(Action::Step { budget: 3 }).unwrap();
+    let ready = h
+        .record
+        .journal
+        .stage
+        .as_ref()
+        .unwrap()
+        .ready_hash
+        .clone()
+        .unwrap();
+    h.apply(Action::Publish {
+        manifest_hash: ready,
+    })
+    .unwrap();
+    h.validate().unwrap();
+    let original = h.snapshot().unwrap();
+    for field in 0..7 {
+        let mut changed = Coordinator::restore(&original, &hash(&original), Toy).unwrap();
+        changed.validate().unwrap(); // warm exact-head proof
+        match field {
+            0 => changed.record.journal.head.state_hex = "04".into(),
+            1 => changed.record.journal.head.event_hex = "07".into(),
+            2 => changed.record.journal.head.score_hex = "0a".into(),
+            3 => changed.record.journal.head.manifest_hash = "aa".repeat(32),
+            4 => changed.record.journal.identity.rules_hash = "bb".repeat(32),
+            5 => changed.record.inbox.last_ack = None,
+            _ => {
+                changed
+                    .record
+                    .journal
+                    .head
+                    .seal
+                    .as_mut()
+                    .unwrap()
+                    .source_anchor = "cc".repeat(32)
+            }
+        }
+        assert!(changed.validate().is_err());
+        let clean = Coordinator::restore(&original, &hash(&original), Toy).unwrap();
+        changed.record = clean.record;
+        changed.validate().unwrap();
+        assert_eq!(changed.snapshot().unwrap(), original);
+    }
+}
