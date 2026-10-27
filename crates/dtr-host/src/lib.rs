@@ -4,7 +4,7 @@
 use dtr_wire::{decode, encode, hash, hex, unhex, Int, Result};
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
+use std::sync::{Mutex, MutexGuard};
 pub mod epoch;
 use epoch::Epoch;
 
@@ -289,6 +289,19 @@ pub struct Proposal {
     pub progress: Option<Progress>,
     pub unchanged: bool,
 }
+// Preserve the original native auto traits. Poison concerns only optional proof
+// copies: discard them and redo full validation, never trust a partial memo.
+fn proof<T: Default>(memo: &Mutex<T>) -> MutexGuard<'_, T> {
+    match memo.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            *guard = T::default();
+            memo.clear_poison();
+            guard
+        }
+    }
+}
 type RecordProof = (Record, Vec<u8>);
 type HeadProof = (Head, Identity, Option<Epoch>, Option<String>);
 pub struct Coordinator<K: Kernel> {
@@ -296,8 +309,8 @@ pub struct Coordinator<K: Kernel> {
     kernel: K,
     // Exact immutable committed-head identity, scoped to this coordinator only.
     // Public record mutation is allowed; equality checks every dependent field.
-    checked_head: RefCell<Option<HeadProof>>,
-    checked_record: RefCell<Option<RecordProof>>,
+    checked_head: Mutex<Option<HeadProof>>,
+    checked_record: Mutex<Option<RecordProof>>,
 }
 
 /// One validation/transition for dense and ordered admission. A zero-width range
@@ -409,8 +422,8 @@ impl<K: Kernel> Coordinator<K> {
                 inbox,
             },
             kernel,
-            checked_head: RefCell::new(None),
-            checked_record: RefCell::new(None),
+            checked_head: Mutex::new(None),
+            checked_record: Mutex::new(None),
         };
         c.validate()?;
         Ok(c)
@@ -422,8 +435,8 @@ impl<K: Kernel> Coordinator<K> {
         let c = Self {
             record: decode(bytes)?,
             kernel,
-            checked_head: RefCell::new(None),
-            checked_record: RefCell::new(None),
+            checked_head: Mutex::new(None),
+            checked_record: Mutex::new(None),
         };
         c.validate()?;
         if c.snapshot()? != bytes {
@@ -432,9 +445,7 @@ impl<K: Kernel> Coordinator<K> {
         Ok(c)
     }
     pub fn snapshot(&self) -> Result<Vec<u8>> {
-        if let Some((_, bytes)) = self
-            .checked_record
-            .borrow()
+        if let Some((_, bytes)) = proof(&self.checked_record)
             .as_ref()
             .filter(|(record, _)| record == &self.record)
         {
@@ -450,9 +461,7 @@ impl<K: Kernel> Coordinator<K> {
         self.validate_record(&self.record)
     }
     fn validate_record(&self, r: &Record) -> Result<()> {
-        if self
-            .checked_record
-            .borrow()
+        if proof(&self.checked_record)
             .as_ref()
             .is_some_and(|(record, _)| record == r)
         {
@@ -460,10 +469,10 @@ impl<K: Kernel> Coordinator<K> {
         }
         // Exact typed identity, not revision alone. No failed or externally changed
         // proposal inherits a successful validation from another record.
-        *self.checked_record.borrow_mut() = None;
+        *proof(&self.checked_record) = None;
         let result = self.validate_record_uncached(r);
         if result.is_err() {
-            *self.checked_head.borrow_mut() = None;
+            *proof(&self.checked_head) = None;
         }
         result
     }
@@ -525,15 +534,13 @@ impl<K: Kernel> Coordinator<K> {
             return Err("coordinator byte capacity".into());
         }
         if bytes.len() <= 256 * 1024 {
-            *self.checked_record.borrow_mut() = Some((r.clone(), bytes));
+            *proof(&self.checked_record) = Some((r.clone(), bytes));
         }
         Ok(())
     }
     fn validate_committed_head(&self, j: &Journal, i: &Inbox) -> Result<()> {
         let h = &j.head;
-        if self
-            .checked_head
-            .borrow()
+        if proof(&self.checked_head)
             .as_ref()
             .is_some_and(|(head, identity, epoch, ack)| {
                 head == h && identity == &j.identity && epoch == &j.epoch && ack == &i.last_ack
@@ -542,7 +549,7 @@ impl<K: Kernel> Coordinator<K> {
             return Ok(());
         }
         // A changed or corrupt key never inherits trusted status.
-        *self.checked_head.borrow_mut() = None;
+        *proof(&self.checked_head) = None;
         if hash(&unhex(&h.state_hex)?) != h.state_hash {
             return Err("committed state mismatch".into());
         }
@@ -582,7 +589,7 @@ impl<K: Kernel> Coordinator<K> {
         if encode(&(h, &j.identity, &j.epoch, &i.last_ack))
             .is_ok_and(|bytes| bytes.len() <= 256 * 1024)
         {
-            *self.checked_head.borrow_mut() = Some((
+            *proof(&self.checked_head) = Some((
                 h.clone(),
                 j.identity.clone(),
                 j.epoch.clone(),
@@ -870,3 +877,21 @@ fn selected_after(inputs: &[Input], cutoff: u64) -> Result<Vec<Input>> {
 }
 
 pub mod observation;
+
+#[cfg(test)]
+mod proof_lock_tests {
+    use super::*;
+    #[test]
+    fn native_panic_discards_poisoned_proofs() {
+        let memo = Mutex::new(Some(vec![1u8, 2, 3]));
+        assert!(std::panic::catch_unwind(|| {
+            let mut guard = memo.lock().unwrap();
+            *guard = Some(vec![9]);
+            panic!("interrupted optional proof update");
+        })
+        .is_err());
+        assert!(memo.is_poisoned());
+        assert!(proof(&memo).is_none());
+        assert!(!memo.is_poisoned());
+    }
+}
