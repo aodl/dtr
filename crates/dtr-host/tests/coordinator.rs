@@ -464,3 +464,48 @@ fn committed_head_memo_never_trusts_mutated_public_records() {
         assert_eq!(changed.snapshot().unwrap(), original);
     }
 }
+
+#[test]
+fn validated_record_session_rejects_stale_mutations_and_is_transactional() {
+    let mut h = fresh();
+    fill(&mut h);
+    let original = h.snapshot().unwrap();
+    h.validate().unwrap();
+    let proposal = h.propose(Action::Step { budget: 1 }).unwrap();
+    // A computed-but-uncommitted proposal cannot change the exported checkpoint.
+    assert_eq!(h.snapshot().unwrap(), original);
+    let before = h.record.clone();
+    h.record.inbox.cursor = Int::from(99);
+    // Ordered admission permits advancing over absent records while a sealed
+    // stage is unfinished. A changed record must be validated, not rejected
+    // solely for differing from the previous proof.
+    h.validate().unwrap();
+    let advanced = h.snapshot().unwrap();
+    Coordinator::restore(&advanced, &hash(&advanced), Toy).unwrap();
+    h.record.inbox.version = 999;
+    assert!(h.validate().is_err());
+    h.record = before;
+    h.validate().unwrap();
+    let before = h.snapshot().unwrap();
+    assert!(h
+        .apply(Action::Publish {
+            manifest_hash: "aa".repeat(32)
+        })
+        .is_err());
+    assert_eq!(h.snapshot().unwrap(), before);
+    h.commit(proposal).unwrap();
+    let committed = h.snapshot().unwrap();
+    let restored = Coordinator::restore(&committed, &hash(&committed), Toy).unwrap();
+    assert_eq!(restored.snapshot().unwrap(), committed);
+    for field in 0..5 {
+        let mut changed = Coordinator::restore(&committed, &hash(&committed), Toy).unwrap();
+        match field {
+            0 => changed.record.journal.stage.as_mut().unwrap().cursor_hash = "00".repeat(32),
+            1 => changed.record.journal.stage.as_mut().unwrap().cursor_hex = "00".into(),
+            2 => changed.record.inbox.reservation.as_mut().unwrap().seal_hash = "00".repeat(32),
+            3 => changed.record.inbox.source_id = "ff".repeat(32),
+            _ => changed.record.version = 999,
+        }
+        assert!(changed.validate().is_err());
+    }
+}

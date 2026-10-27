@@ -184,7 +184,7 @@ pub struct Head {
     pub event_hex: String,
     pub score_hex: String,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Stage {
     pub phase: String,
@@ -195,7 +195,7 @@ pub struct Stage {
     pub cursor_hash: String,
     pub ready_hash: Option<String>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Journal {
     pub version: u32,
@@ -207,13 +207,13 @@ pub struct Journal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epoch: Option<Epoch>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Reservation {
     pub seal: Seal,
     pub seal_hash: String,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Inbox {
     pub version: u32,
@@ -226,7 +226,7 @@ pub struct Inbox {
     pub reservation: Option<Reservation>,
     pub last_ack: Option<String>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
     pub version: u32,
@@ -289,6 +289,7 @@ pub struct Proposal {
     pub progress: Option<Progress>,
     pub unchanged: bool,
 }
+type RecordProof = (Record, Vec<u8>);
 type HeadProof = (Head, Identity, Option<Epoch>, Option<String>);
 pub struct Coordinator<K: Kernel> {
     pub record: Record,
@@ -296,6 +297,7 @@ pub struct Coordinator<K: Kernel> {
     // Exact immutable committed-head identity, scoped to this coordinator only.
     // Public record mutation is allowed; equality checks every dependent field.
     checked_head: RefCell<Option<HeadProof>>,
+    checked_record: RefCell<Option<RecordProof>>,
 }
 
 /// One validation/transition for dense and ordered admission. A zero-width range
@@ -408,6 +410,7 @@ impl<K: Kernel> Coordinator<K> {
             },
             kernel,
             checked_head: RefCell::new(None),
+            checked_record: RefCell::new(None),
         };
         c.validate()?;
         Ok(c)
@@ -420,14 +423,23 @@ impl<K: Kernel> Coordinator<K> {
             record: decode(bytes)?,
             kernel,
             checked_head: RefCell::new(None),
+            checked_record: RefCell::new(None),
         };
         c.validate()?;
-        if encode(&c.record)? != bytes {
+        if c.snapshot()? != bytes {
             return Err("coordinator schema encoding".into());
         }
         Ok(c)
     }
     pub fn snapshot(&self) -> Result<Vec<u8>> {
+        if let Some((_, bytes)) = self
+            .checked_record
+            .borrow()
+            .as_ref()
+            .filter(|(record, _)| record == &self.record)
+        {
+            return Ok(bytes.clone());
+        }
         let b = encode(&self.record)?;
         if b.len() > MAX_IMAGE {
             return Err("coordinator byte capacity".into());
@@ -438,6 +450,24 @@ impl<K: Kernel> Coordinator<K> {
         self.validate_record(&self.record)
     }
     fn validate_record(&self, r: &Record) -> Result<()> {
+        if self
+            .checked_record
+            .borrow()
+            .as_ref()
+            .is_some_and(|(record, _)| record == r)
+        {
+            return Ok(());
+        }
+        // Exact typed identity, not revision alone. No failed or externally changed
+        // proposal inherits a successful validation from another record.
+        *self.checked_record.borrow_mut() = None;
+        let result = self.validate_record_uncached(r);
+        if result.is_err() {
+            *self.checked_head.borrow_mut() = None;
+        }
+        result
+    }
+    fn validate_record_uncached(&self, r: &Record) -> Result<()> {
         let j = &r.journal;
         let i = &r.inbox;
         let h = &j.head;
@@ -490,8 +520,12 @@ impl<K: Kernel> Coordinator<K> {
             }
             _ => return Err("coordinator reservation divergence".into()),
         }
-        if encode(r)?.len() > MAX_IMAGE {
+        let bytes = encode(r)?;
+        if bytes.len() > MAX_IMAGE {
             return Err("coordinator byte capacity".into());
+        }
+        if bytes.len() <= 256 * 1024 {
+            *self.checked_record.borrow_mut() = Some((r.clone(), bytes));
         }
         Ok(())
     }
