@@ -189,7 +189,13 @@ pub fn hash(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len().checked_mul(2).expect("hex capacity"));
+    for &byte in bytes {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 15) as usize] as char);
+    }
+    out
 }
 pub fn unhex(s: &str) -> Result<Vec<u8>> {
     if s.len() % 2 != 0
@@ -213,6 +219,15 @@ pub fn object(v: &Value) -> Result<&serde_json::Map<String, Value>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hex_lookup_preserves_every_byte_and_large_fields() {
+        for n in [0, 1, 32, 256, 65536] {
+            let bytes: Vec<u8> = (0..n).map(|i| i as u8).collect();
+            let reference: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(super::hex(&bytes), reference);
+            assert_eq!(super::unhex(&reference).unwrap(), bytes);
+        }
+    }
     use super::*;
     #[test]
     fn tagged_roundtrip() {
