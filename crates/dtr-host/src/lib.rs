@@ -4,6 +4,7 @@
 use dtr_wire::{decode, encode, hash, hex, unhex, Int, Result};
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, MutexGuard};
 pub mod epoch;
 use epoch::Epoch;
 
@@ -170,7 +171,7 @@ pub fn manifest(seal: &Seal, out: &Output) -> Result<Manifest> {
         manifest_hash: hash(&b),
     })
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Head {
     pub segment_id: Option<Int>,
@@ -183,7 +184,7 @@ pub struct Head {
     pub event_hex: String,
     pub score_hex: String,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Stage {
     pub phase: String,
@@ -194,7 +195,7 @@ pub struct Stage {
     pub cursor_hash: String,
     pub ready_hash: Option<String>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Journal {
     pub version: u32,
@@ -206,13 +207,13 @@ pub struct Journal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epoch: Option<Epoch>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Reservation {
     pub seal: Seal,
     pub seal_hash: String,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Inbox {
     pub version: u32,
@@ -225,7 +226,7 @@ pub struct Inbox {
     pub reservation: Option<Reservation>,
     pub last_ack: Option<String>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
     pub version: u32,
@@ -288,9 +289,28 @@ pub struct Proposal {
     pub progress: Option<Progress>,
     pub unchanged: bool,
 }
+// Preserve the original native auto traits. Poison concerns only optional proof
+// copies: discard them and redo full validation, never trust a partial memo.
+fn proof<T: Default>(memo: &Mutex<T>) -> MutexGuard<'_, T> {
+    match memo.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            *guard = T::default();
+            memo.clear_poison();
+            guard
+        }
+    }
+}
+type RecordProof = (Record, Vec<u8>);
+type HeadProof = (Head, Identity, Option<Epoch>, Option<String>);
 pub struct Coordinator<K: Kernel> {
     pub record: Record,
     kernel: K,
+    // Exact immutable committed-head identity, scoped to this coordinator only.
+    // Public record mutation is allowed; equality checks every dependent field.
+    checked_head: Mutex<Option<HeadProof>>,
+    checked_record: Mutex<Option<RecordProof>>,
 }
 
 /// One validation/transition for dense and ordered admission. A zero-width range
@@ -402,6 +422,8 @@ impl<K: Kernel> Coordinator<K> {
                 inbox,
             },
             kernel,
+            checked_head: Mutex::new(None),
+            checked_record: Mutex::new(None),
         };
         c.validate()?;
         Ok(c)
@@ -413,14 +435,22 @@ impl<K: Kernel> Coordinator<K> {
         let c = Self {
             record: decode(bytes)?,
             kernel,
+            checked_head: Mutex::new(None),
+            checked_record: Mutex::new(None),
         };
         c.validate()?;
-        if encode(&c.record)? != bytes {
+        if c.snapshot()? != bytes {
             return Err("coordinator schema encoding".into());
         }
         Ok(c)
     }
     pub fn snapshot(&self) -> Result<Vec<u8>> {
+        if let Some((_, bytes)) = proof(&self.checked_record)
+            .as_ref()
+            .filter(|(record, _)| record == &self.record)
+        {
+            return Ok(bytes.clone());
+        }
         let b = encode(&self.record)?;
         if b.len() > MAX_IMAGE {
             return Err("coordinator byte capacity".into());
@@ -431,6 +461,22 @@ impl<K: Kernel> Coordinator<K> {
         self.validate_record(&self.record)
     }
     fn validate_record(&self, r: &Record) -> Result<()> {
+        if proof(&self.checked_record)
+            .as_ref()
+            .is_some_and(|(record, _)| record == r)
+        {
+            return Ok(());
+        }
+        // Exact typed identity, not revision alone. No failed or externally changed
+        // proposal inherits a successful validation from another record.
+        *proof(&self.checked_record) = None;
+        let result = self.validate_record_uncached(r);
+        if result.is_err() {
+            *proof(&self.checked_head) = None;
+        }
+        result
+    }
+    fn validate_record_uncached(&self, r: &Record) -> Result<()> {
         let j = &r.journal;
         let i = &r.inbox;
         let h = &j.head;
@@ -459,6 +505,51 @@ impl<K: Kernel> Coordinator<K> {
             return Err("coordinator source/head divergence".into());
         }
         input_root(&i.pending, number(&i.retired_to)?, number(&i.cursor)?)?;
+        self.validate_committed_head(j, i)?;
+        match (&j.stage, &i.reservation) {
+            (None, None) => {}
+            (Some(stage), Some(res)) => {
+                validate_seal(j, &stage.seal, &stage.inputs)?;
+                if stage.fence != j.fence
+                    || !matches!(stage.phase.as_str(), "running" | "ready")
+                    || stage.seal != res.seal
+                    || hash(&res.seal.bytes()?) != res.seal_hash
+                    || selected(i, number(&stage.seal.source_to_exclusive)?)? != stage.inputs
+                {
+                    return Err("reserved stage divergence".into());
+                }
+                let b = unhex(&stage.cursor_hex)?;
+                self.kernel.validate_cursor(&b, &stage.cursor_hash)?;
+                if stage.phase == "ready"
+                    && stage.ready_hash.as_ref()
+                        != Some(&manifest(&stage.seal, &self.kernel.result(&b)?)?.manifest_hash)
+                {
+                    return Err("ready output mismatch".into());
+                }
+            }
+            _ => return Err("coordinator reservation divergence".into()),
+        }
+        let bytes = encode(r)?;
+        if bytes.len() > MAX_IMAGE {
+            return Err("coordinator byte capacity".into());
+        }
+        if bytes.len() <= 256 * 1024 {
+            *proof(&self.checked_record) = Some((r.clone(), bytes));
+        }
+        Ok(())
+    }
+    fn validate_committed_head(&self, j: &Journal, i: &Inbox) -> Result<()> {
+        let h = &j.head;
+        if proof(&self.checked_head)
+            .as_ref()
+            .is_some_and(|(head, identity, epoch, ack)| {
+                head == h && identity == &j.identity && epoch == &j.epoch && ack == &i.last_ack
+            })
+        {
+            return Ok(());
+        }
+        // A changed or corrupt key never inherits trusted status.
+        *proof(&self.checked_head) = None;
         if hash(&unhex(&h.state_hex)?) != h.state_hash {
             return Err("committed state mismatch".into());
         }
@@ -492,31 +583,18 @@ impl<K: Kernel> Coordinator<K> {
         } else if h.segment_id.is_some() || h.manifest_hash != ZERO || i.last_ack.is_some() {
             return Err("genesis head".into());
         }
-        match (&j.stage, &i.reservation) {
-            (None, None) => {}
-            (Some(stage), Some(res)) => {
-                validate_seal(j, &stage.seal, &stage.inputs)?;
-                if stage.fence != j.fence
-                    || !matches!(stage.phase.as_str(), "running" | "ready")
-                    || stage.seal != res.seal
-                    || hash(&res.seal.bytes()?) != res.seal_hash
-                    || selected(i, number(&stage.seal.source_to_exclusive)?)? != stage.inputs
-                {
-                    return Err("reserved stage divergence".into());
-                }
-                let b = unhex(&stage.cursor_hex)?;
-                self.kernel.validate_cursor(&b, &stage.cursor_hash)?;
-                if stage.phase == "ready"
-                    && stage.ready_hash.as_ref()
-                        != Some(&manifest(&stage.seal, &self.kernel.result(&b)?)?.manifest_hash)
-                {
-                    return Err("ready output mismatch".into());
-                }
-            }
-            _ => return Err("coordinator reservation divergence".into()),
-        }
-        if encode(r)?.len() > MAX_IMAGE {
-            return Err("coordinator byte capacity".into());
+
+        // Size checking cannot introduce a new Result/error path. The full record
+        // still undergoes its original structural/capacity checks below.
+        if encode(&(h, &j.identity, &j.epoch, &i.last_ack))
+            .is_ok_and(|bytes| bytes.len() <= 256 * 1024)
+        {
+            *proof(&self.checked_head) = Some((
+                h.clone(),
+                j.identity.clone(),
+                j.epoch.clone(),
+                i.last_ack.clone(),
+            ));
         }
         Ok(())
     }
@@ -799,3 +877,21 @@ fn selected_after(inputs: &[Input], cutoff: u64) -> Result<Vec<Input>> {
 }
 
 pub mod observation;
+
+#[cfg(test)]
+mod proof_lock_tests {
+    use super::*;
+    #[test]
+    fn native_panic_discards_poisoned_proofs() {
+        let memo = Mutex::new(Some(vec![1u8, 2, 3]));
+        assert!(std::panic::catch_unwind(|| {
+            let mut guard = memo.lock().unwrap();
+            *guard = Some(vec![9]);
+            panic!("interrupted optional proof update");
+        })
+        .is_err());
+        assert!(memo.is_poisoned());
+        assert!(proof(&memo).is_none());
+        assert!(!memo.is_poisoned());
+    }
+}

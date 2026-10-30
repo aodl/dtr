@@ -415,3 +415,97 @@ fn epoch_corruption_and_wrong_predecessor_are_rejected_atomically() {
     let damaged = h.snapshot().unwrap();
     assert!(Coordinator::restore(&damaged, &hash(&damaged), Toy).is_err());
 }
+
+#[test]
+fn committed_head_memo_never_trusts_mutated_public_records() {
+    let mut h = fresh();
+    fill(&mut h);
+    h.apply(Action::Step { budget: 3 }).unwrap();
+    let ready = h
+        .record
+        .journal
+        .stage
+        .as_ref()
+        .unwrap()
+        .ready_hash
+        .clone()
+        .unwrap();
+    h.apply(Action::Publish {
+        manifest_hash: ready,
+    })
+    .unwrap();
+    h.validate().unwrap();
+    let original = h.snapshot().unwrap();
+    for field in 0..7 {
+        let mut changed = Coordinator::restore(&original, &hash(&original), Toy).unwrap();
+        changed.validate().unwrap(); // warm exact-head proof
+        match field {
+            0 => changed.record.journal.head.state_hex = "04".into(),
+            1 => changed.record.journal.head.event_hex = "07".into(),
+            2 => changed.record.journal.head.score_hex = "0a".into(),
+            3 => changed.record.journal.head.manifest_hash = "aa".repeat(32),
+            4 => changed.record.journal.identity.rules_hash = "bb".repeat(32),
+            5 => changed.record.inbox.last_ack = None,
+            _ => {
+                changed
+                    .record
+                    .journal
+                    .head
+                    .seal
+                    .as_mut()
+                    .unwrap()
+                    .source_anchor = "cc".repeat(32)
+            }
+        }
+        assert!(changed.validate().is_err());
+        let clean = Coordinator::restore(&original, &hash(&original), Toy).unwrap();
+        changed.record = clean.record;
+        changed.validate().unwrap();
+        assert_eq!(changed.snapshot().unwrap(), original);
+    }
+}
+
+#[test]
+fn validated_record_session_rejects_stale_mutations_and_is_transactional() {
+    let mut h = fresh();
+    fill(&mut h);
+    let original = h.snapshot().unwrap();
+    h.validate().unwrap();
+    let proposal = h.propose(Action::Step { budget: 1 }).unwrap();
+    // A computed-but-uncommitted proposal cannot change the exported checkpoint.
+    assert_eq!(h.snapshot().unwrap(), original);
+    let before = h.record.clone();
+    h.record.inbox.cursor = Int::from(99);
+    // Ordered admission permits advancing over absent records while a sealed
+    // stage is unfinished. A changed record must be validated, not rejected
+    // solely for differing from the previous proof.
+    h.validate().unwrap();
+    let advanced = h.snapshot().unwrap();
+    Coordinator::restore(&advanced, &hash(&advanced), Toy).unwrap();
+    h.record.inbox.version = 999;
+    assert!(h.validate().is_err());
+    h.record = before;
+    h.validate().unwrap();
+    let before = h.snapshot().unwrap();
+    assert!(h
+        .apply(Action::Publish {
+            manifest_hash: "aa".repeat(32)
+        })
+        .is_err());
+    assert_eq!(h.snapshot().unwrap(), before);
+    h.commit(proposal).unwrap();
+    let committed = h.snapshot().unwrap();
+    let restored = Coordinator::restore(&committed, &hash(&committed), Toy).unwrap();
+    assert_eq!(restored.snapshot().unwrap(), committed);
+    for field in 0..5 {
+        let mut changed = Coordinator::restore(&committed, &hash(&committed), Toy).unwrap();
+        match field {
+            0 => changed.record.journal.stage.as_mut().unwrap().cursor_hash = "00".repeat(32),
+            1 => changed.record.journal.stage.as_mut().unwrap().cursor_hex = "00".into(),
+            2 => changed.record.inbox.reservation.as_mut().unwrap().seal_hash = "00".repeat(32),
+            3 => changed.record.inbox.source_id = "ff".repeat(32),
+            _ => changed.record.version = 999,
+        }
+        assert!(changed.validate().is_err());
+    }
+}

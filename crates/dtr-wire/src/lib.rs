@@ -150,6 +150,7 @@ fn validate(v: &Value, depth: usize, count: &mut usize) -> Result<()> {
 }
 // Explicitly sort recursively even if a future host dependency enables serde_json's
 // preserve_order feature through Cargo feature unification.
+#[cfg(test)]
 fn sorted(value: Value) -> Value {
     match value {
         Value::Array(a) => Value::Array(a.into_iter().map(sorted).collect()),
@@ -165,11 +166,54 @@ fn sorted(value: Value) -> Value {
         other => other,
     }
 }
+// Write the validated value without rebuilding its entire object/array tree.
+// Preserve exact serde_json primitive/string escaping and explicit key ordering,
+// including when a consumer enables serde_json/preserve_order.
+fn write_canonical(value: &Value, out: &mut Vec<u8>) -> serde_json::Result<()> {
+    match value {
+        Value::Array(items) => {
+            out.push(b'[');
+            for (i, item) in items.iter().enumerate() {
+                if i != 0 {
+                    out.push(b',');
+                }
+                write_canonical(item, out)?;
+            }
+            out.push(b']');
+        }
+        Value::Object(items) => {
+            out.push(b'{');
+            let mut pair = |i: usize, key: &String, value: &Value| -> serde_json::Result<()> {
+                if i != 0 {
+                    out.push(b',');
+                }
+                serde_json::to_writer(&mut *out, key)?;
+                out.push(b':');
+                write_canonical(value, out)
+            };
+            if items.keys().is_sorted() {
+                for (i, (key, value)) in items.iter().enumerate() {
+                    pair(i, key, value)?;
+                }
+            } else {
+                let mut ordered: Vec<_> = items.iter().collect();
+                ordered.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                for (i, (key, value)) in ordered.into_iter().enumerate() {
+                    pair(i, key, value)?;
+                }
+            }
+            out.push(b'}');
+        }
+        _ => serde_json::to_writer(out, value)?,
+    }
+    Ok(())
+}
 pub fn encode<T: Serialize + ?Sized>(v: &T) -> Result<Vec<u8>> {
     let value = serde_json::to_value(v).map_err(|e| e.to_string())?;
     validate(&value, 0, &mut 0)?;
     // Sorting does not rely on the dependency graph preserving a default map feature.
-    let bytes = serde_json::to_vec(&sorted(value)).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    write_canonical(&value, &mut bytes).map_err(|e| e.to_string())?;
     if bytes.len() > MAX_BYTES {
         return Err("canonical byte limit".into());
     }
@@ -189,7 +233,13 @@ pub fn hash(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len().checked_mul(2).expect("hex capacity"));
+    for &byte in bytes {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 15) as usize] as char);
+    }
+    out
 }
 pub fn unhex(s: &str) -> Result<Vec<u8>> {
     if s.len() % 2 != 0
@@ -213,6 +263,72 @@ pub fn object(v: &Value) -> Result<&serde_json::Map<String, Value>> {
 
 #[cfg(test)]
 mod tests {
+
+    fn reference_encode(value: &serde_json::Value) -> super::Result<Vec<u8>> {
+        super::validate(value, 0, &mut 0)?;
+        let bytes = serde_json::to_vec(&super::sorted(value.clone())).unwrap();
+        if bytes.len() > super::MAX_BYTES {
+            return Err("canonical byte limit".into());
+        }
+        Ok(bytes)
+    }
+    #[test]
+    fn canonical_writer_matches_stateless_oracle_and_rejections() {
+        use serde_json::{json, Value};
+        let mut corpus = vec![
+            Value::Null,
+            json!(true),
+            json!(0),
+            json!(-1),
+            json!({"z":["\\\"\n\t\r\u{0000} é 🟡",null,false],"a":{"zz":1,"aa":2}}),
+            json!({"$integer":"123456789012345678901234567890"}),
+            json!({"$integer":"-0"}),
+            json!({"$integer":"01"}),
+            json!({"$integer":"1","a":0}),
+            json!({"__proto__":0}),
+            json!({"constructor":0}),
+            json!({"bad-key":0}),
+            json!(1.5),
+            json!(9007199254740992u64),
+        ];
+        let mut deep = json!(0);
+        for _ in 0..50 {
+            deep = json!([deep]);
+        }
+        corpus.push(deep);
+        corpus.push(Value::Array(vec![Value::Null; 300001]));
+        for value in corpus {
+            assert_eq!(super::encode(&value), reference_encode(&value));
+        }
+        for bytes in [
+            b"{\"a\":1,\"a\":2}".as_slice(),
+            b"{\"z\":1,\"a\":2}",
+            b" {\"a\":1}",
+            b"-0",
+            b"1.0",
+            b"\"\\u0061\"",
+            b"[",
+            b"\xff",
+        ] {
+            assert!(super::decode::<Value>(bytes).is_err(), "accepted {bytes:?}");
+        }
+        let mut map = serde_json::Map::new();
+        map.insert("z".into(), json!(1));
+        map.insert("a".into(), json!(2));
+        assert_eq!(
+            super::encode(&Value::Object(map)).unwrap(),
+            b"{\"a\":2,\"z\":1}"
+        );
+    }
+    #[test]
+    fn hex_lookup_preserves_every_byte_and_large_fields() {
+        for n in [0, 1, 32, 256, 65536] {
+            let bytes: Vec<u8> = (0..n).map(|i| i as u8).collect();
+            let reference: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(super::hex(&bytes), reference);
+            assert_eq!(super::unhex(&reference).unwrap(), bytes);
+        }
+    }
     use super::*;
     #[test]
     fn tagged_roundtrip() {
