@@ -607,7 +607,14 @@ impl<K: Kernel> Coordinator<K> {
         metadata_hash: String,
     ) -> Result<Epoch> {
         self.validate()?;
-        self.transition_boundary()?;
+        self.transition_boundary(
+            self.record
+                .journal
+                .epoch
+                .as_ref()
+                .is_some_and(|e| e.version == 3),
+            false,
+        )?;
         Epoch::make(
             &observation::publication(&self.record)?.bytes,
             identity,
@@ -616,16 +623,30 @@ impl<K: Kernel> Coordinator<K> {
             metadata_hash,
         )
     }
-    fn transition_boundary(&self) -> Result<()> {
+    /// Explicit application context checkpoint. Identity and logical time are unchanged. Only an already verified empty prefix may advance the source.
+    /// The host validates application semantics; queued inputs cannot be skipped.
+    pub fn prepare_checkpoint(&self, out: &Output, metadata_hash: String) -> Result<Epoch> {
+        self.validate()?;
+        self.transition_boundary(true, true)?;
+        Epoch::checkpoint(
+            &observation::publication(&self.record)?.bytes,
+            out,
+            self.record.inbox.cursor.clone(),
+            self.record.inbox.source_anchor.clone(),
+            metadata_hash,
+        )
+    }
+    fn transition_boundary(&self, allow_checkpoint: bool, allow_empty_prefix: bool) -> Result<()> {
         let r = &self.record;
         let i = &r.inbox;
         let j = &r.journal;
         if j.stage.is_some()
             || i.reservation.is_some()
             || !i.pending.is_empty()
-            || i.cursor != i.retired_to
-            || i.cursor != j.head.source_to_exclusive
-            || j.head.seal.is_none()
+            || (!allow_empty_prefix
+                && (i.cursor != i.retired_to || i.cursor != j.head.source_to_exclusive))
+            || (j.head.seal.is_none()
+                && !(allow_checkpoint && j.epoch.is_some() && j.head.segment_id.is_some()))
         {
             return Err("epoch requires drained committed boundary".into());
         }
@@ -658,7 +679,16 @@ impl<K: Kernel> Coordinator<K> {
                 if retry {
                     unchanged = true;
                 } else {
-                    self.transition_boundary()?;
+                    self.transition_boundary(
+                        epoch.version == 3
+                            || self
+                                .record
+                                .journal
+                                .epoch
+                                .as_ref()
+                                .is_some_and(|e| e.version == 3),
+                        epoch.version == 3,
+                    )?;
                     let previous = observation::publication(&self.record)?.bytes;
                     epoch.expected_predecessor(&previous)?;
                     if epoch.source_cursor != r.inbox.cursor
@@ -680,6 +710,9 @@ impl<K: Kernel> Coordinator<K> {
                         event_hex,
                         score_hex,
                     };
+                    if epoch.version == 3 {
+                        r.inbox.retired_to = epoch.source_cursor.clone();
+                    }
                     r.inbox.last_ack = Some(epoch.transition_hash.clone());
                     r.journal.epoch = Some(*epoch);
                     inc(&mut r.journal.fence)?;

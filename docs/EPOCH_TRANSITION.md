@@ -93,3 +93,37 @@ Independent competitive-Life tests exercise first and later transitions. Client
 tests cover v7/v8 retained predecessors, eviction, fresh startup, explicit resync
 and rollback.
 Existing v6-only and historical encoding tests remain enabled.
+
+## Explicit application context checkpoints (epoch v3 / publication v9)
+
+`prepare_checkpoint(output, metadata_hash)` / `prepareCheckpoint(output,
+metadataHash)` commits an application-supplied context operation under the exact
+existing source/rules/configuration/schema identity. This explicit operation
+requires an authenticated epoch, with no pending input, reservation or unfinished
+kernel stage. It advances the publication/transition index while preserving
+logical time. It may also retire an already verified empty source prefix: the
+source cursor and anchor come from the verified inbox, never from a supplied
+position or hint. The v3 predecessor summary includes the old source anchor.
+Without source advancement the anchor must remain unchanged; an empty advancing
+prefix is acknowledged atomically with the checkpoint. Queued input can never
+be discarded this way. Rules transitions retain their fully drained boundary. Consecutive checkpoints need no intervening simulation step.
+
+The caller validates the application transformation and supplies the canonical
+metadata preimage to its independent replay. DTR authenticates the state, event,
+score and metadata hashes; it does not interpret clocks, lifecycle rules or any
+application semantics. Context is not a source-stream record and never fabricates
+source positions. No scheduler or time source is added to DTR.
+
+Epoch v3 uses the `DTREPOCH3` commitment domain and a bounded predecessor summary.
+It must preserve all identity fields. Existing v1/v2 rules transitions retain
+their identity-change requirement and their published bytes. Publication v9 marks
+an active context-checkpoint epoch. Normal successor seals retain `DTRSEAL2` and
+bind its checkpoint hash. A later explicit rules transition uses the existing
+rules-transition proof with a verified v9 predecessor; wire envelope numbers do
+not replace the monotonic publication index or application rules identity.
+
+Clients must support this proof before an application activates the capability.
+Certificate verification, deployment binding, source boundaries, same-height
+conflict detection and monotonic head protection remain mandatory. An older
+client fails closed on the new envelope; there is no trust fallback. Content-pin
+unit vectors demonstrate shared bytes, not IC certificate authenticity.

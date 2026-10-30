@@ -1,7 +1,7 @@
 //! The same epoch API works with the independent competitive-Life kernel.
 use dtr_core::ResumableKernel;
 use dtr_host::{Action, Coordinator, Identity, Input, Kernel, Output, Progress, Seal};
-use dtr_wire::{hash, hex, unhex, Result};
+use dtr_wire::{hash, hex, unhex, Int, Result};
 use life_conformance::{Board, Cursor};
 #[derive(Clone, Copy)]
 struct Life;
@@ -202,5 +202,74 @@ fn life_generation_and_cell_owners_survive_epoch_and_restart() {
             .epoch_hash
             .as_ref(),
         Some(&second.transition_hash)
+    );
+}
+
+#[test]
+fn life_is_unchanged_by_consecutive_same_identity_context_checkpoints() {
+    // A separate generic example: no application rules or ambient clock enter DTR.
+    let initial = Board {
+        width: 4,
+        height: 4,
+        generation: 0,
+        cells: vec![0; 16],
+    };
+    let mut h = Coordinator::create(
+        &initial.encode(),
+        Identity {
+            source_id: "01".repeat(32),
+            rules_hash: "02".repeat(32),
+            config_hash: "03".repeat(32),
+            schema_hash: "04".repeat(32),
+        },
+        0,
+        0,
+        "00".repeat(32),
+        Life,
+    )
+    .unwrap();
+    finish(&mut h, 1);
+    let state = unhex(&h.record.journal.head.state_hex).unwrap();
+    let output = Output {
+        state: state.clone(),
+        events: vec![],
+        scores: vec![],
+    };
+    let identity = Identity {
+        rules_hash: "05".repeat(32),
+        ..h.record.journal.identity.clone()
+    };
+    let first = h
+        .prepare_transition(identity, &output, "cd".repeat(32))
+        .unwrap();
+    h.apply(Action::Transition {
+        epoch: Box::new(first),
+        state_hex: hex(&state),
+        event_hex: String::new(),
+        score_hex: String::new(),
+    })
+    .unwrap();
+    for n in 0..3 {
+        let e = h
+            .prepare_checkpoint(&output, hash(format!("independent-context:{n}").as_bytes()))
+            .unwrap();
+        h.apply(Action::Transition {
+            epoch: Box::new(e),
+            state_hex: hex(&state),
+            event_hex: String::new(),
+            score_hex: String::new(),
+        })
+        .unwrap();
+        assert_eq!(h.record.journal.head.logical_end, Int::from(1));
+        assert_eq!(unhex(&h.record.journal.head.state_hex).unwrap(), state);
+        let bytes = h.snapshot().unwrap();
+        h = Coordinator::restore(&bytes, &hash(&bytes), Life).unwrap();
+    }
+    finish(&mut h, 2);
+    assert_eq!(
+        Board::decode(&unhex(&h.record.journal.head.state_hex).unwrap())
+            .unwrap()
+            .generation,
+        2
     );
 }

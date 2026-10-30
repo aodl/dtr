@@ -3,7 +3,7 @@ import {validateEpochHead,validateEpochPredecessor} from '../runtime/epoch.mjs';
 import {encodeCanonical,cloneCanonical} from '../runtime/canonical.mjs';
 import {sha256,manifest} from '../runtime/seal.mjs';
 import {hex,unhex} from '../protocol/bytes.mjs';
-export const PUBLICATION_VERSION=8,CHUNK_BYTES=16384,MAX_ARTIFACT_BYTES=1024*1024,MAX_PUBLICATION_BYTES=65536;
+export const PUBLICATION_VERSION=9,CHUNK_BYTES=16384,MAX_ARTIFACT_BYTES=1024*1024,MAX_PUBLICATION_BYTES=65536;
 export const KINDS=['state','events','scores'];
 export function describeArtifact(kind,bytes){
   if(![...KINDS,'render'].includes(kind)||!(bytes instanceof Uint8Array)||bytes.length>MAX_ARTIFACT_BYTES)throw new Error('observation artifact bounds');
@@ -13,9 +13,9 @@ export function describeArtifact(kind,bytes){
 /** v6 identity depends only on the committed head, never ingestion or private work.
  * render is a bounded, game-specific projection; it does NOT replace consensus events.
  */
-export function publication(record,{version=record.journal.epoch?(record.journal.epoch.version===1?7:8):6,render=null}={}){
-  if(![5,6,7,8].includes(version)||Boolean(record.journal.epoch)!==(version>=7)
-    ||(version===7&&record.journal.epoch?.version!==1)||(version===8&&record.journal.epoch?.version!==2))throw new Error('observation publication version');
+export function publication(record,{version=record.journal.epoch?(record.journal.epoch.version===1?7:record.journal.epoch.version===2?8:9):6,render=null}={}){
+  if(![5,6,7,8,9].includes(version)||Boolean(record.journal.epoch)!==(version>=7)
+    ||(version===7&&record.journal.epoch?.version!==1)||(version===8&&record.journal.epoch?.version!==2)||(version===9&&record.journal.epoch?.version!==3))throw new Error('observation publication version');
   if(version===5&&render!==null)throw new Error('legacy projection unsupported');
   if(![5,6].includes(record.version)||(record.version===6)!==Boolean(record.journal.epoch))throw new Error('observation coordinator version');
   const h=record.journal.head,artifacts=[unhex(h.state_hex),unhex(h.event_hex),unhex(h.score_hex)];
@@ -63,7 +63,7 @@ export class PublicationWindow {
     this.maxSegments=maxSegments;this.maxBytes=maxBytes;
   }
   retain(record,options={}){
-    const p=publication(record,options);if(![6,7,8].includes(p.data.version))throw new Error('retention requires publication v6/v7/v8');
+    const p=publication(record,options);if(![6,7,8,9].includes(p.data.version))throw new Error('retention requires publication v6/v7/v8');
     if(this.#items.has(p.sha256))return p.sha256;
     const size=p.bytes.length+p.artifacts.reduce((n,b)=>n+b.length,0);
     if(size>this.maxBytes)throw new Error('publication exceeds retention byte capacity');

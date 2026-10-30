@@ -9,7 +9,7 @@ import {publication,PublicationWindow} from '../../packages/observation/publicat
 import {verifyPinnedPublication,verifyRetainedPredecessor,verifyCertificatePublication,PublicationSequence,ArtifactAssembler} from '../../packages/client/verification.mjs';
 import {hex,unhex} from '../../packages/protocol/bytes.mjs';
 import {LifeInputKernel} from '../../packages/kernels/life-input.mjs';
-import {board,encodeBoard} from '../../packages/kernels/life.mjs';
+import {board,encodeBoard,decodeBoard} from '../../packages/kernels/life.mjs';
 const identity={source_id:'01'.repeat(32),rules_hash:'02'.repeat(32),config_hash:'03'.repeat(32),schema_hash:'04'.repeat(32)};
 const next={...identity,rules_hash:'05'.repeat(32),schema_hash:'06'.repeat(32)};
 const out={state:Uint8Array.of(4),events:Uint8Array.of(7),scores:Uint8Array.of(9)};
@@ -154,4 +154,63 @@ test('v7 certificate binding is required before cross-epoch sequencing',async()=
  await assert.rejects(verifyCertificatePublication(p.bytes,Uint8Array.of(2),policy,verify(old.sha256)),/root mismatch/);
  assert.throws(()=>sequence.resync(before),/changed/);
  await assert.rejects(verifyCertificatePublication(p.bytes,Uint8Array.of(2),policy,null),/unavailable/);
+});
+
+test('explicit same-identity checkpoints and consecutive idle checkpoints advance no logical or source time',async()=>{
+ let h=committed();h.apply(action(h.prepareTransition(next,out,'cd'.repeat(32))));
+ const sequence=new PublicationSequence(),window=new PublicationWindow({maxSegments:8});
+ let old=publication(h.publicationRecord());sequence.accept(await ticket(old));window.retain(h.publicationRecord());
+ const sizes=[];
+ for(let n=0;n<48;n++){
+  const saved=h.snapshot(),e=h.prepareCheckpoint(out,sha256(encodeCanonical({domain:'application-context-v1',observed_ns:BigInt(n+1)*86400000000000n})));
+  assert.equal(e.version,3);assert.deepEqual(e.new_identity,next);assert.equal(e.logical_boundary,1n);assert.equal(e.source_cursor,2n);
+  assert.throws(()=>h.prepareTransition(next,out,'ef'.repeat(32)),/boundary|identity/);
+  const a=action(e);if(n===0){assert.throws(()=>h.apply(a,'before'),/commit/);assert.deepEqual(h.snapshot(),saved);}
+  h.apply(a);h=TimelineCoordinator.restore(h.snapshot(),sha256(h.snapshot()),toy);
+  const p=publication(h.publicationRecord()),t=await ticket(p);assert.equal(p.data.version,9);sequence.accept(t);
+  assert.equal((await verifyRetainedPredecessor(old.bytes,t)).root_hash,old.sha256);window.retain(h.publicationRecord());
+  const previous=await ticket(old);assert.throws(()=>sequence.accept(previous));assert.throws(()=>sequence.resync(previous));assert.equal(sequence.last,t);
+  const after=h.snapshot();h.apply(a);assert.deepEqual(h.snapshot(),after);sizes.push(p.bytes.length);old=p;
+ }
+ assert.ok(Math.max(...sizes)<8192);assert.ok(Math.max(...sizes)-Math.min(...sizes)<512);
+ finish(h,2n);sequence.accept(await ticket(publication(h.publicationRecord())));assert.equal(h.committed().seal.logical_start,1n);assert.equal(h.committed().seal.source_from,2n);
+});
+
+test('checkpoint context, identity, source and predecessor corruption fail without changing the host',()=>{
+ const h=committed();h.apply(action(h.prepareTransition(next,out,'cd'.repeat(32))));const saved=h.snapshot(),e=h.prepareCheckpoint(out,'ef'.repeat(32));
+ for(const alter of [x=>x.new_identity.rules_hash='ff'.repeat(32),x=>x.source_cursor++,x=>x.logical_boundary++,x=>x.source_anchor='ff'.repeat(32),x=>x.predecessor.publication_hash='ff'.repeat(32),x=>x.previous_chain_hash='ff'.repeat(32),x=>x.transition_index++]){
+  const a=action(structuredClone(e));alter(a.epoch);rehash(a.epoch);assert.throws(()=>h.apply(a));assert.deepEqual(h.snapshot(),saved);
+ }
+ const a=action(structuredClone(e));a.epoch.metadata_hash='ff'.repeat(32);assert.throws(()=>h.apply(a),/commitment/);assert.deepEqual(h.snapshot(),saved);
+ h.ingestPrefix(2n,['aa'],'ab'.repeat(32));const pending=h.snapshot();assert.throws(()=>h.prepareCheckpoint(out,'ef'.repeat(32)),/boundary/);assert.deepEqual(h.snapshot(),pending);
+});
+
+test('independent Life resumes after consecutive context checkpoints without artificial aging ticks',()=>{
+ const h=TimelineCoordinator.create(encodeBoard(board(4,4,Array(16).fill(0))),identity,{logical_start:0n,source_from:0n},LifeInputKernel);finish(h,1n);
+ const state=unhex(h.committed().state_hex),o={state,events:new Uint8Array(),scores:new Uint8Array()};h.apply({kind:'transition',epoch:h.prepareTransition(next,o,'cd'.repeat(32)),state_hex:hex(state),event_hex:'',score_hex:''});
+ for(let n=0;n<3;n++){const e=h.prepareCheckpoint(o,sha256(encodeCanonical({domain:'independent-life-context-v1',elapsed_ns:BigInt(n+1)*86400000000000n})));h.apply({kind:'transition',epoch:e,state_hex:hex(state),event_hex:'',score_hex:''});assert.deepEqual(unhex(h.committed().state_hex),state);assert.equal(h.committed().logical_end,1n);}
+ finish(h,2n);assert.equal(decodeBoard(unhex(h.committed().state_hex)).generation,2n);
+});
+
+test('same-identity v3 checkpoint bytes match the independent Rust public vector',()=>{
+ const h=committed();h.apply(action(h.prepareTransition(next,out,'cd'.repeat(32))));
+ const previous=publication(h.publicationRecord()),one=h.prepareCheckpoint(out,'ef'.repeat(32));h.apply(action(one));const first=publication(h.publicationRecord()),two=h.prepareCheckpoint(out,'dd'.repeat(32));h.apply(action(two));const second=publication(h.publicationRecord());finish(h,2n);const successor=publication(h.publicationRecord());
+ const actual={previous_publication_hex:hex(previous.bytes),first_epoch_hex:hex(encodeCanonical(one)),first_publication_hex:hex(first.bytes),second_epoch_hex:hex(encodeCanonical(two)),second_publication_hex:hex(second.bytes),successor_seal_hex:hex(encodeSeal(h.committed().seal)),successor_publication_hex:hex(successor.bytes)};
+ assert.deepEqual(actual,JSON.parse(readFileSync(new URL('../fixtures/application-checkpoint-v3.json',import.meta.url))));
+});
+
+test('v9 same-height conflicts and invalid certificate binding remain fatal',async()=>{
+ const h=committed();h.apply(action(h.prepareTransition(next,out,'cd'.repeat(32))));h.apply(action(h.prepareCheckpoint(out,'ef'.repeat(32))));const p=publication(h.publicationRecord()),t=await ticket(p),sequence=new PublicationSequence();sequence.accept(t);
+ const altered=structuredClone(p.data);altered.artifacts[0].length++;const bytes=encodeCanonical(altered),bad=await verifyPinnedPublication(bytes,sha256(bytes));assert.throws(()=>sequence.accept(bad),/same-height conflicting/);assert.equal(sequence.last,t);
+ const policy={canister_id:'toy-canister',network:'pocketic-local',now_ns:1000n,max_age_ns:100n,max_future_ns:10n};
+ await assert.rejects(verifyCertificatePublication(p.bytes,Uint8Array.of(1),policy,async()=>({canister_id:policy.canister_id,network:policy.network,certificate_time_ns:1000n,certified_data_hex:'00'.repeat(32)})),/root mismatch/);
+});
+
+test('context checkpoint acknowledges only a verified empty prefix, never queued source input',async()=>{
+ const h=committed();h.apply(action(h.prepareTransition(next,out,'cd'.repeat(32))));const old=publication(h.publicationRecord());
+ h.ingestOrdered(2n,9007199254741000n,[],'bc'.repeat(32));assert.throws(()=>h.prepareTransition({...next,config_hash:'08'.repeat(32)},out,'cd'.repeat(32)),/boundary/);
+ const e=h.prepareCheckpoint(out,'ef'.repeat(32));assert.equal(e.source_cursor,9007199254741000n);assert.equal(e.logical_boundary,1n);assert.equal(e.predecessor.source_anchor,'ab'.repeat(32));
+ h.apply(action(e));assert.equal(h.status().retired_to,9007199254741000n);const p=publication(h.publicationRecord()),t=await ticket(p);await verifyRetainedPredecessor(old.bytes,t);
+ const sequence=new PublicationSequence();sequence.accept(await ticket(old));sequence.accept(t);
+ h.ingestOrdered(9007199254741000n,9007199254741001n,[{position:9007199254741000n,payload_hex:'aa'}],'bd'.repeat(32));const saved=h.snapshot();assert.throws(()=>h.prepareCheckpoint(out,'ef'.repeat(32)),/boundary/);assert.deepEqual(h.snapshot(),saved);
 });

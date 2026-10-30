@@ -105,6 +105,7 @@ pub fn publication(r: &Record) -> Result<Published> {
             None => 6,
             Some(1) => 7,
             Some(2) => 8,
+            Some(3) => 9,
             Some(_) => return Err("observation epoch version".into()),
         },
         identity: r.journal.identity.clone(),

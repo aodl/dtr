@@ -509,3 +509,147 @@ fn validated_record_session_rejects_stale_mutations_and_is_transactional() {
         assert!(changed.validate().is_err());
     }
 }
+
+#[test]
+fn explicit_idle_checkpoints_preserve_clock_source_and_recovery() {
+    let mut h = committed();
+    let e = h
+        .prepare_transition(next_identity(), &output(), "cd".repeat(32))
+        .unwrap();
+    h.apply(transition(&e)).unwrap();
+    let boundary = h.record.journal.head.logical_end.clone();
+    let source = h.record.inbox.cursor.clone();
+    for n in 0..48 {
+        let old = dtr_host::observation::publication(&h.record).unwrap();
+        let e = h
+            .prepare_checkpoint(&output(), hash(format!("context:{n}").as_bytes()))
+            .unwrap();
+        assert_eq!(e.version, 3);
+        assert_eq!(e.new_identity, next_identity());
+        assert_eq!(e.logical_boundary, boundary);
+        assert_eq!(e.source_cursor, source);
+        assert!(h
+            .prepare_transition(next_identity(), &output(), "ef".repeat(32))
+            .is_err());
+        e.expected_predecessor(&old.bytes).unwrap();
+        h.apply(transition(&e)).unwrap();
+        load(&mut h);
+        let p = dtr_host::observation::publication(&h.record).unwrap();
+        assert_eq!(p.data.version, 9);
+        assert!(p.bytes.len() < 8192);
+        let saved = h.snapshot().unwrap();
+        h.apply(transition(&e)).unwrap();
+        assert_eq!(saved, h.snapshot().unwrap());
+    }
+    finish(&mut h, Some(2));
+    let seal = h.record.journal.head.seal.as_ref().unwrap();
+    assert_eq!(seal.logical_start, boundary);
+    assert_eq!(seal.source_from, source);
+}
+
+#[test]
+fn checkpoint_identity_context_and_source_corruption_are_atomic_failures() {
+    let mut h = committed();
+    let first = h
+        .prepare_transition(next_identity(), &output(), "cd".repeat(32))
+        .unwrap();
+    h.apply(transition(&first)).unwrap();
+    let e = h.prepare_checkpoint(&output(), "ef".repeat(32)).unwrap();
+    let saved = h.snapshot().unwrap();
+    for n in 0..7 {
+        let mut bad = e.clone();
+        match n {
+            0 => bad.new_identity.rules_hash = "ff".repeat(32),
+            1 => bad.source_cursor = Int::from(3),
+            2 => bad.logical_boundary = Int::from(2),
+            3 => bad.source_anchor = "ff".repeat(32),
+            4 => bad.predecessor.as_mut().unwrap().publication_hash = "ff".repeat(32),
+            5 => bad.previous_chain_hash = Some("ff".repeat(32)),
+            _ => bad.transition_index = Some(Int::from(9)),
+        }
+        bad.transition_hash = bad.commitment().unwrap();
+        assert!(h.apply(transition(&bad)).is_err());
+        assert_eq!(saved, h.snapshot().unwrap());
+    }
+    let mut bad = e.clone();
+    bad.metadata_hash = "ff".repeat(32);
+    assert!(h.apply(transition(&bad)).is_err());
+    assert_eq!(saved, h.snapshot().unwrap());
+    h.apply(Action::Ingest {
+        start: Int::from(2),
+        records: vec![Some("aa".into())],
+        anchor: "ab".repeat(32),
+    })
+    .unwrap();
+    let pending = h.snapshot().unwrap();
+    assert!(h.prepare_checkpoint(&output(), "ef".repeat(32)).is_err());
+    assert_eq!(pending, h.snapshot().unwrap());
+}
+
+#[test]
+fn same_identity_checkpoint_public_bytes_match_independent_js() {
+    use dtr_host::observation::publication;
+    use dtr_wire::hex;
+    let mut h = committed();
+    let first_rule = h
+        .prepare_transition(next_identity(), &output(), "cd".repeat(32))
+        .unwrap();
+    h.apply(transition(&first_rule)).unwrap();
+    let previous = publication(&h.record).unwrap();
+    let one = h.prepare_checkpoint(&output(), "ef".repeat(32)).unwrap();
+    h.apply(transition(&one)).unwrap();
+    let first = publication(&h.record).unwrap();
+    let two = h.prepare_checkpoint(&output(), "dd".repeat(32)).unwrap();
+    h.apply(transition(&two)).unwrap();
+    let second = publication(&h.record).unwrap();
+    finish(&mut h, Some(2));
+    let successor = publication(&h.record).unwrap();
+    let actual = serde_json::json!({"previous_publication_hex":hex(&previous.bytes),"first_epoch_hex":hex(&encode(&one).unwrap()),"first_publication_hex":hex(&first.bytes),"second_epoch_hex":hex(&encode(&two).unwrap()),"second_publication_hex":hex(&second.bytes),"successor_seal_hex":hex(&h.record.journal.head.seal.as_ref().unwrap().bytes().unwrap()),"successor_publication_hex":hex(&successor.bytes)});
+    let expected: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/application-checkpoint-v3.json"
+    ))
+    .unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn checkpoint_acknowledges_only_an_already_verified_empty_prefix() {
+    let mut h = committed();
+    let first = h
+        .prepare_transition(next_identity(), &output(), "cd".repeat(32))
+        .unwrap();
+    h.apply(transition(&first)).unwrap();
+    let old = dtr_host::observation::publication(&h.record).unwrap();
+    h.apply(Action::IngestOrdered {
+        start: Int::from(2),
+        end: Int(9_007_199_254_741_000u64.into()),
+        inputs: vec![],
+        anchor: "bc".repeat(32),
+    })
+    .unwrap();
+    let mut new_identity = next_identity();
+    new_identity.config_hash = "08".repeat(32);
+    assert!(h
+        .prepare_transition(new_identity, &output(), "cd".repeat(32))
+        .is_err());
+    let e = h.prepare_checkpoint(&output(), "ef".repeat(32)).unwrap();
+    assert_eq!(e.source_cursor, Int(9_007_199_254_741_000u64.into()));
+    assert_eq!(e.logical_boundary, Int::from(1));
+    e.expected_predecessor(&old.bytes).unwrap();
+    h.apply(transition(&e)).unwrap();
+    assert_eq!(h.record.inbox.retired_to, e.source_cursor);
+    load(&mut h);
+    h.apply(Action::IngestOrdered {
+        start: e.source_cursor.clone(),
+        end: Int(9_007_199_254_741_001u64.into()),
+        inputs: vec![Input {
+            position: e.source_cursor,
+            payload_hex: "aa".into(),
+        }],
+        anchor: "bd".repeat(32),
+    })
+    .unwrap();
+    let saved = h.snapshot().unwrap();
+    assert!(h.prepare_checkpoint(&output(), "ef".repeat(32)).is_err());
+    assert_eq!(saved, h.snapshot().unwrap());
+}

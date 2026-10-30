@@ -2,7 +2,7 @@
  * Trusted host API: ingestPrefix is NOT a ledger verifier or a public user method.
  * The backing store must atomically commit the whole replacement, or retain the old one.
  */
-import {makeEpoch,validateEpoch,validateEpochPredecessor,epochOutput} from './epoch.mjs';
+import {makeEpoch,makeCheckpoint,validateEpoch,validateEpochPredecessor,epochOutput} from './epoch.mjs';
 import {publication} from '../observation/publication.mjs';
 import {AtomicJournalStore, SegmentJournal} from './journal.mjs';
 import {VerifiedInbox} from '../source/inbox.mjs';
@@ -105,11 +105,15 @@ export class TimelineCoordinator {
   publicationRecord() {return this.store.publicRecord();}
   status() {return this.store.status();}
   prepareTransition(identity,out,metadataHash){
-    const r=this.store.read();this.#transitionBoundary(r);
+    const r=this.store.read();this.#transitionBoundary(r,r.journal.epoch?.version===3,false);
     return makeEpoch(publication(r).bytes,identity,out,r.inbox.source_anchor,metadataHash);
   }
-  #transitionBoundary(r){const j=r.journal,i=r.inbox;
-    if(j.stage||i.reservation||i.pending.length||i.cursor!==i.retired_to||i.cursor!==j.head.source_to_exclusive||!j.head.seal)throw new Error('epoch requires drained committed boundary');
+  prepareCheckpoint(out,metadataHash){
+    const r=this.store.read();this.#transitionBoundary(r,true,true);
+    return makeCheckpoint(publication(r).bytes,out,r.inbox.source_anchor,metadataHash,r.inbox.cursor);
+  }
+  #transitionBoundary(r,allowCheckpoint=false,allowEmptyPrefix=false){const j=r.journal,i=r.inbox;
+    if(j.stage||i.reservation||i.pending.length||(!allowEmptyPrefix&&(i.cursor!==i.retired_to||i.cursor!==j.head.source_to_exclusive))||(!j.head.seal&&!(allowCheckpoint&&j.epoch&&j.head.segment_id!==null)))throw new Error('epoch requires drained committed boundary');
   }
   /** Trusted synchronous orchestration; one outer fence, no nested store transactions. */
   propose(action) {
@@ -124,12 +128,13 @@ export class TimelineCoordinator {
         const e=structuredClone(action.epoch),out={state:unhex(action.state_hex),events:unhex(action.event_hex),scores:unhex(action.score_hex)};
         validateEpoch(e);epochOutput(e,out);
         if(j.epoch&&same(j.epoch,e)){unchanged=true;break;}
-        this.#transitionBoundary(r);
+        this.#transitionBoundary(r,e.version===3||j.epoch?.version===3,e.version===3);
         validateEpochPredecessor(e,publication(r).bytes);
         if(e.source_cursor!==i.cursor||e.source_anchor!==i.source_anchor)throw new Error('epoch expected predecessor/source');
         r.version=6;j.version=3;j.identity=structuredClone(e.new_identity);j.epoch=e;
         j.head={segment_id:e.segment_id,logical_end:e.logical_boundary,source_to_exclusive:e.source_cursor,
           manifest_hash:e.transition_hash,state_hash:e.state_hash,state_hex:action.state_hex,seal:null,event_hex:action.event_hex,score_hex:action.score_hex};
+        if(e.version===3)i.retired_to=e.source_cursor;
         i.last_ack=e.transition_hash;j.fence++;j.revision++;i.revision++;break;
       }
       case 'ingest': {

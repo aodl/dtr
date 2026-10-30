@@ -21,6 +21,8 @@ pub struct EpochPredecessor {
     pub manifest_hash: String,
     pub state_hash: String,
     pub epoch_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_anchor: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,6 +58,7 @@ impl Epoch {
         let mut bytes = match self.version {
             1 => b"DTREPOCH1".to_vec(),
             2 => b"DTREPOCH2".to_vec(),
+            3 => b"DTREPOCH3".to_vec(),
             _ => return Err("epoch version".into()),
         };
         bytes.extend(encode(&value)?);
@@ -70,7 +73,7 @@ impl Epoch {
             {
                 Ok(1)
             }
-            2 => {
+            2 | 3 => {
                 let n = number(
                     self.transition_index
                         .as_ref()
@@ -204,17 +207,34 @@ impl Epoch {
         ] {
             digest(d)?;
         }
-        if !matches!(predecessor.version, 7 | 8)
-            || self.new_identity == predecessor.identity
+        if !matches!(predecessor.version, 7..=9)
+            || (self.new_identity == predecessor.identity) != (self.version == 3)
             || self.new_identity.source_id != predecessor.identity.source_id
             || number(&self.segment_id)?
                 != number(&predecessor.segment_id)?
                     .checked_add(1)
                     .ok_or("epoch segment overflow")?
             || self.logical_boundary != predecessor.logical_end
-            || self.source_cursor != predecessor.source_cursor
+            || if self.version == 3 {
+                self.source_cursor < predecessor.source_cursor
+            } else {
+                self.source_cursor != predecessor.source_cursor
+            }
         {
             return Err("epoch predecessor boundary/identity".into());
+        }
+        if self.version == 3 {
+            let old_anchor = predecessor
+                .source_anchor
+                .as_ref()
+                .ok_or("checkpoint source anchor")?;
+            digest(old_anchor)?;
+            if self.source_cursor == predecessor.source_cursor && &self.source_anchor != old_anchor
+            {
+                return Err("checkpoint empty source anchor".into());
+            }
+        } else if predecessor.source_anchor.is_some() {
+            return Err("rules epoch extension fields".into());
         }
         number(&predecessor.segment_id)?;
         number(&predecessor.logical_end)?;
@@ -229,7 +249,7 @@ impl Epoch {
             1 => {
                 self.validate_v1()?;
             }
-            2 => self.validate_v2()?,
+            2 | 3 => self.validate_v2()?,
             _ => return Err("epoch version".into()),
         }
         Ok(())
@@ -247,15 +267,12 @@ impl Epoch {
                     return Err("epoch expected predecessor".into());
                 }
             }
-            2 => {
+            2 | 3 => {
                 let summary = self.predecessor.as_ref().unwrap();
                 validate_catalog(&p)?;
                 let prior_epoch = p.epoch.as_ref().ok_or("epoch predecessor epoch")?;
-                let seal = p
-                    .head
-                    .seal
-                    .as_ref()
-                    .ok_or("epoch predecessor must be committed")?;
+                prior_epoch.validate()?;
+                let anchor = predecessor_anchor(&p, self.version == 3 || p.version == 9)?;
                 if hash(bytes) != summary.publication_hash
                     || p.version != summary.version
                     || p.identity != summary.identity
@@ -271,7 +288,8 @@ impl Epoch {
                         .checked_add(1)
                         .ok_or("epoch transition index overflow")?
                         != self.index()?
-                    || seal.source_anchor != self.source_anchor
+                    || (self.version != 3 && *anchor != self.source_anchor)
+                    || (self.version == 3 && summary.source_anchor.as_ref() != Some(anchor))
                 {
                     return Err("epoch expected predecessor".into());
                 }
@@ -336,12 +354,49 @@ impl Epoch {
         Ok(())
     }
 
+    pub(crate) fn checkpoint(
+        previous: &[u8],
+        out: &Output,
+        source_cursor: Int,
+        source_anchor: String,
+        metadata_hash: String,
+    ) -> Result<Self> {
+        let p: Publication = decode(previous)?;
+        Self::make_kind(
+            previous,
+            p.identity,
+            out,
+            source_anchor,
+            metadata_hash,
+            true,
+            Some(source_cursor),
+        )
+    }
     pub(crate) fn make(
         previous: &[u8],
         identity: Identity,
         out: &Output,
         source_anchor: String,
         metadata_hash: String,
+    ) -> Result<Self> {
+        Self::make_kind(
+            previous,
+            identity,
+            out,
+            source_anchor,
+            metadata_hash,
+            false,
+            None,
+        )
+    }
+    fn make_kind(
+        previous: &[u8],
+        identity: Identity,
+        out: &Output,
+        source_anchor: String,
+        metadata_hash: String,
+        checkpoint: bool,
+        checkpoint_source: Option<Int>,
     ) -> Result<Self> {
         let p: Publication = decode(previous)?;
         let id = number(
@@ -354,11 +409,14 @@ impl Epoch {
         .ok_or("epoch segment overflow")?;
         let (version, previous_publication_hex, transition_index, previous_chain_hash, predecessor) =
             if p.version == 6 && p.epoch.is_none() {
+                if checkpoint {
+                    return Err("checkpoint requires an authenticated epoch".into());
+                }
                 (1, hex(previous), None, None, None)
-            } else if matches!(p.version, 7 | 8) {
+            } else if matches!(p.version, 7..=9) {
                 let prior = p.epoch.as_ref().ok_or("epoch predecessor epoch")?;
                 (
-                    2,
+                    if checkpoint { 3 } else { 2 },
                     String::new(),
                     Some(Int(prior
                         .index()?
@@ -380,6 +438,11 @@ impl Epoch {
                         manifest_hash: p.head.manifest_hash.clone(),
                         state_hash: p.head.state_hash.clone(),
                         epoch_hash: prior.transition_hash.clone(),
+                        source_anchor: if checkpoint {
+                            Some(predecessor_anchor(&p, true)?.clone())
+                        } else {
+                            None
+                        },
                     }),
                 )
             } else {
@@ -391,7 +454,7 @@ impl Epoch {
             new_identity: identity,
             segment_id: Int(id.into()),
             logical_boundary: p.head.logical_end,
-            source_cursor: p.head.source_to_exclusive,
+            source_cursor: checkpoint_source.unwrap_or(p.head.source_to_exclusive),
             source_anchor,
             state_hash: hash(&out.state),
             event_hash: hash(&out.events),
@@ -425,4 +488,63 @@ fn validate_catalog(p: &Publication) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Verify the precise committed catalog without needing its artifact bytes.
+fn predecessor_anchor(p: &Publication, allow_checkpoint: bool) -> Result<&String> {
+    let h = &p.head;
+    if h.state_hash != p.artifacts[0].sha256 {
+        return Err("epoch predecessor state".into());
+    }
+    let e = p.epoch.as_ref().ok_or("epoch predecessor epoch")?;
+    if !matches!((p.version, e.version), (7, 1) | (8, 2) | (9, 3)) || p.identity != e.new_identity {
+        return Err("epoch predecessor version/identity".into());
+    }
+    let head_id = number(h.segment_id.as_ref().ok_or("epoch predecessor head")?)?;
+    let epoch_id = number(&e.segment_id)?;
+    if head_id < epoch_id
+        || h.logical_end < e.logical_boundary
+        || h.source_to_exclusive < e.source_cursor
+    {
+        return Err("epoch predecessor boundary".into());
+    }
+    if let Some(s) = &h.seal {
+        if head_id == epoch_id
+            || s.logical_start < e.logical_boundary
+            || s.source_from < e.source_cursor
+            || (epoch_id.checked_add(1) == Some(head_id)
+                && (s.previous_manifest != e.transition_hash
+                    || s.previous_state != e.state_hash
+                    || s.logical_start != e.logical_boundary
+                    || s.source_from != e.source_cursor))
+            || !s.matches(&p.identity)
+            || s.epoch_hash.as_ref() != Some(&e.transition_hash)
+            || h.segment_id.as_ref() != Some(&s.segment_id)
+            || h.logical_end != s.logical_end
+            || h.source_to_exclusive != s.source_to_exclusive
+            || manifest_root(
+                s,
+                [
+                    &p.artifacts[0].sha256,
+                    &p.artifacts[1].sha256,
+                    &p.artifacts[2].sha256,
+                ],
+            )? != h.manifest_hash
+        {
+            return Err("epoch predecessor manifest".into());
+        }
+        return Ok(&s.source_anchor);
+    }
+    if !allow_checkpoint
+        || h.segment_id.as_ref() != Some(&e.segment_id)
+        || h.logical_end != e.logical_boundary
+        || h.source_to_exclusive != e.source_cursor
+        || h.manifest_hash != e.transition_hash
+        || p.artifacts[0].sha256 != e.state_hash
+        || p.artifacts[1].sha256 != e.event_hash
+        || p.artifacts[2].sha256 != e.score_hash
+    {
+        return Err("epoch predecessor must be committed".into());
+    }
+    Ok(&e.source_anchor)
 }

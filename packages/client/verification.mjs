@@ -16,7 +16,7 @@ async function content(bytes,expectedRoot){
   bytes=Uint8Array.from(bytes); // Snapshot mutable transport memory before any await.
   digest(expectedRoot);if(await sha256Web(bytes)!==expectedRoot)throw new Error('publication root mismatch');
   const p=decodeCanonical(bytes);
-  if(![5,6,7,8].includes(p.version))throw new Error('publication version');
+  if(![5,6,7,8,9].includes(p.version))throw new Error('publication version');
   keys(p,p.version===5?['version','revision','identity','ingest_head','head','chunk_bytes','artifacts']
     :[ 'version','identity','head','chunk_bytes','artifacts','render_format',...(p.version>=7?['epoch']:[])]);
   if(p.chunk_bytes!==CHUNK||(p.version===5&&(!Number.isSafeInteger(p.revision)||p.revision<0)))throw new Error('publication version/revision');
@@ -44,7 +44,7 @@ async function content(bytes,expectedRoot){
     if(p.version===7){
       if(p.epoch.version!==1)throw new Error('epoch publication version');
       await content(previous,await sha256Web(previous));
-    }else if(p.epoch.version!==2)throw new Error('epoch publication version');
+    }else if(p.epoch.version!==({8:2,9:3})[p.version])throw new Error('epoch publication version');
     epochChains.set(p,await sha256Web(epochChainPayload(p.epoch)));
     checkEpochHead(p.epoch,h,p.identity,p.artifacts.slice(0,3).map(a=>a.sha256));
   }
@@ -97,7 +97,7 @@ export async function verifyRetainedPredecessor(bytes,successor){
   if(!authentic.has(successor))throw new Error('verified successor required');
   if(!(bytes instanceof Uint8Array)||bytes.length>MAX_ENVELOPE)throw new Error('publication bounds');
   bytes=Uint8Array.from(bytes);const root=await sha256Web(bytes),p=await content(bytes,root),next=successor.publication;
-  if(![6,7,8].includes(p.version)||![6,7,8].includes(next.version))throw new Error('retained publication identity');
+  if(![6,7,8,9].includes(p.version)||![6,7,8,9].includes(next.version))throw new Error('retained publication identity');
   // A successor seal authenticates only the predecessor's authoritative
   // manifest (state, events and scores). Optional render bytes require their
   // own directly authenticated catalog and cannot inherit predecessor trust.
@@ -111,6 +111,7 @@ export async function verifyRetainedPredecessor(bytes,successor){
       if(root!==q.publication_hash||p.version!==q.version||Object.keys(p.identity).some(k=>p.identity[k]!==q.identity[k])
         ||p.head.segment_id!==q.segment_id||p.head.logical_end!==q.logical_end||p.head.source_to_exclusive!==q.source_cursor
         ||p.head.manifest_hash!==q.manifest_hash||p.head.state_hash!==q.state_hash||p.epoch?.transition_hash!==q.epoch_hash
+        ||(next.epoch.version===3&&q.source_anchor!==(p.head.seal?.source_anchor??p.epoch?.source_anchor))
         ||epochChains.get(p)!==next.epoch.previous_chain_hash||(p.epoch.transition_index??1n)+1n!==next.epoch.transition_index)throw new Error('retained epoch predecessor');
     }
     const extra=successor.mode==='certificate-verifier'?{canister_id:successor.canister_id,network:successor.network,certificate_time_ns:successor.certificate_time_ns}:{};
@@ -153,8 +154,8 @@ export class ArtifactAssembler {
 function deployment(a,b){
  if(a.mode!==b.mode||a.canister_id!==b.canister_id||a.network!==b.network)throw new Error('observation deployment/rules changed');
 }
-function crossing(a,b,resync){
- if(![7,8].includes(b.version))throw new Error('observation deployment/rules changed');
+function crossing(a,b,resync,previousRoot){
+ if(![7,8,9].includes(b.version))throw new Error('observation deployment/rules changed');
  const e=b.epoch,shape=epochStructure(e),summary=e.version===1?shape.previous:{identity:shape.predecessor.identity,head:{segment_id:shape.predecessor.segment_id,logical_end:shape.predecessor.logical_end,source_to_exclusive:shape.predecessor.source_cursor}};
  if(Object.keys(a.identity).some(k=>a.identity[k]!==summary.identity[k])||a.render_format!==b.render_format)throw new Error('observation epoch identity');
  if(e.version===1){if(a.version!==6)throw new Error('observation epoch identity');}
@@ -163,13 +164,14 @@ function crossing(a,b,resync){
  if(old>cut||a.head.logical_end>e.logical_boundary||a.head.source_to_exclusive>e.source_cursor)throw new Error('observation epoch rollback');
  if(old===cut){
   if(e.version===1&&hex(encodeCanonical(a))!==e.previous_publication_hex)throw new Error('observation epoch predecessor mismatch');
-  if(e.version===2&&(a.head.manifest_hash!==shape.predecessor.manifest_hash||a.head.state_hash!==shape.predecessor.state_hash))throw new Error('observation epoch predecessor mismatch');
+  if(e.version>=2&&(a.head.manifest_hash!==shape.predecessor.manifest_hash||a.head.state_hash!==shape.predecessor.state_hash))throw new Error('observation epoch predecessor mismatch');
  }
+ if(old===cut&&e.version===3&&(previousRoot!==shape.predecessor.publication_hash||shape.predecessor.source_anchor!==(a.head.seal?.source_anchor??a.epoch?.source_anchor)))throw new Error('observation epoch predecessor mismatch');
  if(!resync&&(old!==cut||b.head.segment_id!==e.segment_id))throw new Error('epoch snapshot resync required');
 }
 function sameEpoch(a,b){
  if(b.version!==a.version||Object.keys(b.identity).some(k=>b.identity[k]!==a.identity[k]))return false;
- if(a.version>=7&&a.epoch.transition_hash!==b.epoch.transition_hash)throw new Error('observation epoch changed');
+ if(a.version>=7&&a.epoch.transition_hash!==b.epoch.transition_hash){if(b.epoch.version===3)return false;throw new Error('observation epoch changed');}
  return true;
 }
 export class PublicationSequence {
@@ -179,7 +181,7 @@ export class PublicationSequence {
   const p=verified.publication,prior=this.last?.publication;
   if(prior){
    deployment(this.last,verified);
-   if(!sameEpoch(prior,p)){crossing(prior,p,false);this.last=verified;return verified;}
+   if(!sameEpoch(prior,p)){crossing(prior,p,false,this.last.root_hash);this.last=verified;return verified;}
    if(p.version===5){
     if(p.revision<prior.revision||p.ingest_head<prior.ingest_head)throw new Error('observation rollback');
     if(p.revision===prior.revision&&verified.root_hash!==this.last.root_hash)throw new Error('same-revision conflicting observation');
@@ -203,7 +205,7 @@ export class PublicationSequence {
   if(!this.last)return this.accept(verified);
   deployment(this.last,verified);
   const a=this.last.publication,b=verified.publication;
-  if(!sameEpoch(a,b))crossing(a,b,true);
+  if(!sameEpoch(a,b))crossing(a,b,true,this.last.root_hash);
   else if(b.render_format!==a.render_format)throw new Error('observation deployment/rules changed');
   const old=a.head.segment_id===null?-1n:a.head.segment_id,next=b.head.segment_id===null?-1n:b.head.segment_id;
   if(next<=old||b.head.logical_end<a.head.logical_end||b.head.source_to_exclusive<a.head.source_to_exclusive)throw new Error('observation rollback');
